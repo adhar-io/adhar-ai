@@ -1,0 +1,124 @@
+{
+  "cluster": [
+    {
+      "name": "list_pods",
+      "access": "read"
+    },
+    {
+      "name": "describe",
+      "access": "read"
+    },
+    {
+      "name": "get_events",
+      "access": "read"
+    },
+    {
+      "name": "logs",
+      "access": "read"
+    },
+    {
+      "name": "resource_health",
+      "access": "read"
+    }
+  ],
+  "gitops": [
+    {
+      "name": "app_status",
+      "access": "read"
+    },
+    {
+      "name": "sync_status",
+      "access": "read"
+    },
+    {
+      "name": "app_diff",
+      "access": "read"
+    },
+    {
+      "name": "propose_change",
+      "access": "write"
+    }
+  ],
+  "provision": [
+    {
+      "name": "list_xrs",
+      "access": "read"
+    },
+    {
+      "name": "xr_status",
+      "access": "read"
+    },
+    {
+      "name": "propose_xr",
+      "access": "write"
+    }
+  ],
+  "observability": [
+    {
+      "name": "promql",
+      "access": "read"
+    },
+    {
+      "name": "logql",
+      "access": "read"
+    },
+    {
+      "name": "traceql",
+      "access": "read"
+    },
+    {
+      "name": "slo_burn",
+      "access": "read"
+    },
+    {
+      "name": "correlate",
+      "access": "read"
+    }
+  ],
+  "security": [
+    {
+      "name": "findings",
+      "access": "read"
+    },
+    {
+      "name": "policy_explain",
+      "access": "read"
+    },
+    {
+      "name": "posture",
+      "access": "read"
+    },
+    {
+      "name": "propose_exception",
+      "access": "write"
+    }
+  ],
+  "cost": [
+    {
+      "name": "cost_by",
+      "access": "read"
+    },
+    {
+      "name": "budget_status",
+      "access": "read"
+    },
+    {
+      "name": "showback",
+      "access": "read"
+    }
+  ],
+  "catalog": [
+    {
+      "name": "search_packages",
+      "access": "read"
+    },
+    {
+      "name": "template_params",
+      "access": "read"
+    },
+    {
+      "name": "scaffold",
+      "access": "write"
+    }
+  ]
+}

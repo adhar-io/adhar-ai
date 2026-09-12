@@ -1,0 +1,149 @@
+name: images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: adhar-io
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # id-token: write is what makes keyless signing possible — the OIDC token
+      # identifies this workflow as the signer. The platform's supply-chain
+      # policy accepts exactly that identity for ghcr.io/adhar-io/* images, so
+      # without it these images cannot pass on an enforcing cluster.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: sigstore/cosign-installer@v3
+      - uses: anchore/sbom-action/download-syft@v0
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One build, eight names. The platform package's Deployments reference a
+      # distinct image name per role, but the role comes from the container
+      # `args`, so the same artifact serves all of them.
+      #
+      # There is deliberately NO adhar-ai-gateway: ADR-0025 retired that role in
+      # favour of the upstream agentgateway proxy. Publishing it would re-create
+      # an image that nothing deploys.
+      - name: Compute names and tags
+        id: tags
+        run: |
+          NAMES="adhar-ai-runtime"
+          for d in cluster gitops provision observability security cost catalog; do
+            NAMES="$NAMES adhar-ai-mcp-$d"
+          done
+
+          VERSION=""
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
+          TAGS=""
+          for n in $NAMES; do
+            # `latest` on main and on tags — Adhar-owned images track :latest
+            # with imagePullPolicy: Always (see the package's values.yaml).
+            TAGS="${TAGS}${REGISTRY}/${OWNER}/${n}:latest,"
+            TAGS="${TAGS}${REGISTRY}/${OWNER}/${n}:sha-${GITHUB_SHA::12},"
+            if [ -n "$VERSION" ]; then
+              TAGS="${TAGS}${REGISTRY}/${OWNER}/${n}:${VERSION},"
+            fi
+          done
+          {
+            echo "names=${NAMES}"
+            echo "tags=${TAGS%,}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            adhar.io/origin=adhar-ai
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Sign by DIGEST, once per published name. Signing a tag would strand the
+      # signature the next time `latest` moves; the digest is what an admission
+      # controller actually verifies.
+      - name: Sign the images (keyless)
+        env:
+          COSIGN_YES: "true"
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for n in ${{ steps.tags.outputs.names }}; do
+            ref="${REGISTRY}/${OWNER}/${n}@${DIGEST}"
+            echo "signing $ref"
+            cosign sign "$ref"
+          done
+
+      - name: Attach an SBOM to each image
+        env:
+          COSIGN_YES: "true"
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # All eight names are the same artifact, so one SBOM describes them all.
+          syft "${REGISTRY}/${OWNER}/adhar-ai-runtime@${DIGEST}" \
+            -o spdx-json=sbom.spdx.json
+          for n in ${{ steps.tags.outputs.names }}; do
+            ref="${REGISTRY}/${OWNER}/${n}@${DIGEST}"
+            echo "attesting $ref"
+            cosign attest --predicate sbom.spdx.json --type spdxjson "$ref"
+          done
+
+      # Exercise the roles that actually ship. The previous smoke test started
+      # the retired `gateway` role, so it proved nothing about what is deployed.
+      - name: Smoke-test the published image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          IMG="${REGISTRY}/${OWNER}/adhar-ai-runtime@${DIGEST}"
+
+          # Every domain's tool inventory must load. This is what the MCP
+          # servers serve, and a missing domain is a silently empty tool list.
+          docker run --rm --entrypoint adhar-ai "$IMG" tools
+
+          # One MCP server must come up and answer its health probe, which is
+          # exactly what the Deployment's readinessProbe does.
+          docker run --rm -d --name mcp -p 18080:8080 "$IMG" \
+            mcp --domain=cluster --listen=:8080
+          for _ in $(seq 1 30); do
+            curl -fsS localhost:18080/healthz >/dev/null 2>&1 && break || sleep 1
+          done
+          curl -fsS localhost:18080/healthz
+          docker rm -f mcp
+
+      - name: Verify the signature is discoverable
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${REGISTRY}/${OWNER}/adhar-ai-runtime@${DIGEST}"

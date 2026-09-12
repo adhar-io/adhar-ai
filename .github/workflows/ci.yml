@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - name: Install
+        run: uv sync --frozen --extra rag
+      - name: Lint
+        run: uv run ruff check src tests
+      - name: Type-check
+        run: uv run mypy src
+      - name: Test
+        run: uv run pytest -q
+      - name: Tool-registry snapshot
+        # The MCP tool schemas are the contract with the Go CLI (ADR-0024 §10);
+        # a drift here is a breaking change, not a refactor.
+        run: |
+          uv run adhar-ai tools > /tmp/tools.json
+          diff -u contract/tools.json /tmp/tools.json

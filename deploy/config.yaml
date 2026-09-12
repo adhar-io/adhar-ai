@@ -1,0 +1,59 @@
+# Extracted verbatim from the platform package's `adhar-ai-config` ConfigMap
+# (platform/stack/packages/ai/adhar-ai/manifests/agent-runtime.yaml).
+# docker-compose mounts this at /etc/adhar-ai/config.yaml, exactly as the
+# Deployment does, so local behaviour matches the cluster.
+# -------------------------------------------------------------------------
+# Staged autonomy. Global default is deliberately conservative: `suggest`.
+#   read-only        : investigate + answer; no write tools offered at all
+#   suggest          : write tools allowed, but every write yields a PR and
+#                       pauses for a human merge (assistant-equivalent)
+#   approve-to-apply : write yields a PR; CI may auto-merge under policy
+#   scoped           : narrow, policy-gated auto-merge of PRs on allowlisted
+#                       paths — still a Git PR, never a direct mutation
+# -------------------------------------------------------------------------
+autonomy:
+  default: suggest
+# Global agent-loop budgets (belt-and-suspenders with the gateway budgets).
+limits:
+  maxSteps: 12
+  maxToolCallsPerOp: 40
+# Repos/paths the write path may target (defense-in-depth with the Kyverno
+# guardrail + Gitea branch protection).
+writePolicy:
+  allowedRepos: [packages, environments]
+  allowedPathPrefixes:
+    - "packages/"
+    - "environments/"
+# Event-driven operators. Autonomy is per-operator, never above `suggest`
+# here — bump deliberately as trust is calibrated (ADR-0024 consequences).
+operators:
+  alert-triage:
+    trigger: alertmanager
+    autonomy: suggest
+    allowedTools: [promql, logql, app_status, correlate, propose_change]
+  drift-explain:
+    trigger: argocd-notifications
+    autonomy: read-only
+    allowedTools: [app_status, app_diff, sync_status]
+  cost-advisor:
+    trigger: cron
+    autonomy: suggest
+    allowedTools: [cost_by, budget_status, showback, propose_change]
+  upgrade-preflight:
+    trigger: manual
+    autonomy: suggest
+    allowedTools: [resource_health, app_status, findings, propose_change]
+# MCP server endpoints the runtime mounts as tool groups.
+mcpServers:
+  cluster:       http://adhar-ai-mcp-cluster.adhar-system.svc.cluster.local:8080
+  gitops:        http://adhar-ai-mcp-gitops.adhar-system.svc.cluster.local:8080
+  provision:     http://adhar-ai-mcp-provision.adhar-system.svc.cluster.local:8080
+  observability: http://adhar-ai-mcp-observability.adhar-system.svc.cluster.local:8080
+  security:      http://adhar-ai-mcp-security.adhar-system.svc.cluster.local:8080
+  cost:          http://adhar-ai-mcp-cost.adhar-system.svc.cluster.local:8080
+  catalog:       http://adhar-ai-mcp-catalog.adhar-system.svc.cluster.local:8080
+# RAG grounding store (pgvector on CNPG — see pgvector-rag.yaml).
+rag:
+  enabled: true
+  database: adhar-ai-rag
+  table: kb_chunk

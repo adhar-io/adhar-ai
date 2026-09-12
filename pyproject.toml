@@ -1,0 +1,69 @@
+[project]
+name = "adhar-ai"
+version = "0.1.0"
+description = "Adhar AI — MCP-native tool servers, a provider-agnostic LLM gateway, and a GitOps-safe agent runtime for the Adhar platform (ADR-0024)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Adharlabs Pte Ltd" }]
+
+dependencies = [
+    "mcp>=2.2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "anthropic>=0.40",
+    "kubernetes>=31.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# pgvector RAG store. Optional so the MCP/gateway images stay slim and so the
+# runtime degrades to "RAG disabled" rather than crash-looping when unkeyed.
+rag = ["psycopg[binary]>=3.2", "pgvector>=0.3"]
+# Local embedding fallback when no LLM provider key is configured. Deliberately
+# optional — it is a ~2GB dependency tree.
+local-embeddings = ["sentence-transformers>=3.0"]
+
+[project.scripts]
+adhar-ai = "adhar_ai.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "mypy>=1.13",
+    "ruff>=0.8",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adhar_ai"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["adhar_ai"]
+mypy_path = "src"
+ignore_missing_imports = true
+warn_unused_ignores = false
+disallow_untyped_defs = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]

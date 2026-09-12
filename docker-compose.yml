@@ -1,0 +1,164 @@
+# Local development stack: the gateway, all seven MCP servers, the runtime, and
+# a pgvector Postgres for RAG.
+#
+#   export ANTHROPIC_API_KEY=sk-ant-...      # or leave unset for read-only mode
+#   docker compose up --build
+#   curl localhost:8080/healthz              # runtime
+#   curl localhost:8081/healthz              # gateway
+#   curl localhost:8090/healthz              # mcp-cluster
+#
+# Backend URLs default to a port-forwarded Adhar cluster on the host; override
+# them in a .env file. Any backend left unset makes its tools report
+# "not configured" — they never fabricate a result.
+
+x-image: &image
+  build: .
+  image: adhar-ai:dev
+
+x-mcp-env: &mcp-env
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # LOCAL-DEV WIRING. This points at the bundled gateway service below, which is
+  # why it is set explicitly: the code's default is the platform AI data plane
+  # (ai/agentgateway, ADR-0025) at
+  # http://adhar-ai-gateway.adhar-system.svc.cluster.local:8080/v1, unresolvable
+  # off-cluster. Either shape works — the client normalizes the `/v1` suffix.
+  LLM_GATEWAY_URL: http://gateway:8080
+  # Also local-dev only: in the platform the MCP servers get no OIDC settings at
+  # all, because agentgateway validates the Keycloak token in front of all seven.
+  OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-https://keycloak.adhar.localtest.me:8443/realms/adhar}
+  OIDC_CLIENT_ID: adhar-ai
+  # Point at a port-forwarded cluster, e.g.
+  #   kubectl -n adhar-system port-forward svc/gitea-http 3000:3000
+  GITEA_API_URL: ${GITEA_API_URL:-http://host.docker.internal:3000}
+  GITEA_ORG: ${GITEA_ORG:-adhar}
+  ARGOCD_URL: ${ARGOCD_URL:-http://host.docker.internal:8090}
+  ARGOCD_USERNAME: ${ARGOCD_USERNAME:-admin}
+  ARGOCD_PASSWORD: ${ARGOCD_PASSWORD:-}
+  PROMETHEUS_URL: ${PROMETHEUS_URL:-}
+  LOKI_URL: ${LOKI_URL:-}
+  TEMPO_URL: ${TEMPO_URL:-}
+  OPENCOST_URL: ${OPENCOST_URL:-}
+  # No cluster reachable from the container by default: say so loudly rather
+  # than hanging on the in-cluster API server address.
+  ADHAR_AI_KUBE_DISABLED: ${ADHAR_AI_KUBE_DISABLED:-1}
+
+services:
+  gateway:
+    <<: *image
+    command: ["gateway", "--listen=:8080"]
+    ports: ["8081:8080"]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Mirrors the keys the `adhar-ai-llm` secret projects.
+      PROVIDER: ${ADHAR_AI_LLM_PROVIDER:-anthropic}
+      API_KEY: ${ANTHROPIC_API_KEY:-}
+      MODEL: ${ADHAR_AI_LLM_MODEL:-claude-sonnet-5}
+      ENDPOINT: ${ADHAR_AI_LLM_ENDPOINT:-}
+      BUDGET_PER_USER_DAILY_TOKENS: "2000000"
+      BUDGET_PER_OP_MAX_TOOL_CALLS: "40"
+      BUDGET_PER_OP_MAX_TOKENS: "400000"
+      RATE_LIMIT_REQUESTS_PER_MINUTE: "60"
+
+  mcp-cluster:
+    <<: *image
+    command: ["mcp", "--domain=cluster", "--listen=:8080"]
+    ports: ["8090:8080"]
+    environment:
+      <<: *mcp-env
+      MCP_DOMAIN: cluster
+      GITEA_WRITE_ENABLED: "false"
+
+  mcp-gitops:
+    <<: *image
+    command: ["mcp", "--domain=gitops", "--listen=:8080"]
+    ports: ["8091:8080"]
+    environment:
+      <<: *mcp-env
+      MCP_DOMAIN: gitops
+      GITEA_WRITE_ENABLED: ${GITEA_WRITE_ENABLED:-false}
+      GITEA_WRITE_REPOS: packages,environments
+      GITEA_BOT_USER: ${GITEA_BOT_USER:-adhar-ai-bot}
+      GITEA_BOT_TOKEN: ${GITEA_BOT_TOKEN:-}
+
+  mcp-provision:
+    <<: *image
+    command: ["mcp", "--domain=provision", "--listen=:8080"]
+    ports: ["8092:8080"]
+    environment:
+      <<: *mcp-env
+      MCP_DOMAIN: provision
+      GITEA_WRITE_ENABLED: ${GITEA_WRITE_ENABLED:-false}
+      GITEA_WRITE_REPOS: packages,environments
+      GITEA_BOT_TOKEN: ${GITEA_BOT_TOKEN:-}
+
+  mcp-observability:
+    <<: *image
+    command: ["mcp", "--domain=observability", "--listen=:8080"]
+    ports: ["8093:8080"]
+    environment:
+      <<: *mcp-env
+      MCP_DOMAIN: observability
+      GITEA_WRITE_ENABLED: "false"
+
+  mcp-security:
+    <<: *image
+    command: ["mcp", "--domain=security", "--listen=:8080"]
+    ports: ["8094:8080"]
+    environment:
+      <<: *mcp-env
+      MCP_DOMAIN: security
+      GITEA_WRITE_ENABLED: ${GITEA_WRITE_ENABLED:-false}
+      GITEA_WRITE_REPOS: packages,environments
+      GITEA_BOT_TOKEN: ${GITEA_BOT_TOKEN:-}
+
+  mcp-cost:
+    <<: *image
+    command: ["mcp", "--domain=cost", "--listen=:8080"]
+    ports: ["8095:8080"]
+    environment:
+      <<: *mcp-env
+      MCP_DOMAIN: cost
+      GITEA_WRITE_ENABLED: "false"
+
+  mcp-catalog:
+    <<: *image
+    command: ["mcp", "--domain=catalog", "--listen=:8080"]
+    ports: ["8096:8080"]
+    environment:
+      <<: *mcp-env
+      MCP_DOMAIN: catalog
+      GITEA_WRITE_ENABLED: ${GITEA_WRITE_ENABLED:-false}
+      GITEA_WRITE_REPOS: packages,environments
+      GITEA_BOT_TOKEN: ${GITEA_BOT_TOKEN:-}
+
+  runtime:
+    <<: *image
+    command: ["runtime", "--config=/etc/adhar-ai/config.yaml", "--listen=:8080"]
+    ports: ["8080:8080"]
+    depends_on: [gateway, rag-db]
+    volumes:
+      # The same ConfigMap key the platform mounts, and the platform repo's docs
+      # for RAG ingestion (adjust the host path to your checkout).
+      - ./deploy/config.yaml:/etc/adhar-ai/config.yaml:ro
+      - ${ADHAR_DOCS_PATH:-../../adhar/docs}:/etc/adhar-ai/docs:ro
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LLM_GATEWAY_URL: http://gateway:8080
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-https://keycloak.adhar.localtest.me:8443/realms/adhar}
+      OIDC_CLIENT_ID: adhar-ai
+      ADHAR_AI_DOCS_PATH: /etc/adhar-ai/docs
+      ADHAR_AI_RAG_DSN: postgresql://adhar_ai:adhar_ai@rag-db:5432/adhar_ai_rag
+      ADHAR_AI_DRIFT_POLL_SECONDS: "300"
+      ADHAR_AI_COST_POLL_SECONDS: "86400"
+
+  rag-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: adhar_ai
+      POSTGRES_PASSWORD: adhar_ai
+      POSTGRES_DB: adhar_ai_rag
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adhar_ai -d adhar_ai_rag"]
+      interval: 5s
+      retries: 10
