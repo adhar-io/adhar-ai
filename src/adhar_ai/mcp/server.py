@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -60,9 +61,31 @@ def build_server(cfg: MCPConfig) -> Any:
     return mcp
 
 
+def transport_security(cfg: MCPConfig) -> TransportSecuritySettings:
+    """DNS-rebinding settings for the streamable-HTTP transport.
+
+    The SDK's default allow-list is localhost-only. In a Pod that rejects every
+    real caller — agentgateway reaches these servers through a Service
+    `backendRef`, so the Host header is the Service DNS name or a Pod IP — and
+    the whole federated tool surface answers `421 Invalid Host header`. See
+    `MCPConfig.allowed_hosts` for why `*` (guard off) is the right default here
+    and what the actual boundary is.
+    """
+    if not cfg.dns_rebinding_protection:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    hosts = list(cfg.allowed_hosts)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        # Origin is a browser-only header; mirroring the host list keeps a
+        # browser-based MCP client working against the same allow-list.
+        allowed_origins=[f"http://{h}" for h in hosts] + [f"https://{h}" for h in hosts],
+    )
+
+
 def build_app(cfg: MCPConfig) -> Any:
     """Starlette ASGI app: `/mcp` (streamable HTTP) + `/healthz` + `/readyz`."""
-    return build_server(cfg).streamable_http_app()
+    return build_server(cfg).streamable_http_app(transport_security=transport_security(cfg))
 
 
 def expected_write_enabled(domain: str) -> bool:

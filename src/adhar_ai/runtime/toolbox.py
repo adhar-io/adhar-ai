@@ -141,20 +141,60 @@ class MCPToolbox:
         return _unwrap(result)
 
 
+def _is_error(result: Any) -> bool:
+    """Did the server flag this call as failed?
+
+    Both spellings are checked on purpose. The wire field is `isError`, and the
+    Python SDK models it as `is_error`; which one an object carries depends on
+    whether it arrived as a parsed model or as a raw dict. Reading only the
+    camelCase name — as this did — means `getattr` misses on every SDK model and
+    a FAILED TOOL CALL IS HANDED TO THE MODEL AS A SUCCESSFUL TEXT RESULT, and
+    is audited `decision="ok"`. That is the worst possible failure mode for an
+    agent: it reasons on, and cites, an error string as if it were data.
+    """
+    for attribute in ("is_error", "isError"):
+        value = getattr(result, attribute, None)
+        if value is not None:
+            return bool(value)
+    if isinstance(result, dict):
+        return bool(result.get("is_error") or result.get("isError"))
+    return False
+
+
+def _structured_of(result: Any) -> Any:
+    """The structured payload, under either spelling (see `_is_error`)."""
+    for attribute in ("structured_content", "structuredContent"):
+        value = getattr(result, attribute, None)
+        if value is not None:
+            return value
+    if isinstance(result, dict):
+        return result.get("structured_content") or result.get("structuredContent")
+    return None
+
+
 def _unwrap(result: Any) -> dict[str, Any]:
     """Normalize an MCP CallToolResult into a plain dict for the model."""
-    if getattr(result, "isError", False):
+    if _is_error(result):
         return {"error": _text_of(result)}
-    structured = getattr(result, "structuredContent", None)
+    structured = _structured_of(result)
     if isinstance(structured, dict):
-        # FastMCP wraps a non-dict return value under "result".
-        return structured.get("result", structured) if len(structured) == 1 else structured
+        # FastMCP wraps a non-dict return value under "result". Unwrapping it can
+        # yield a list, so it goes back through `_as_dict` — the declared return
+        # type is a dict and `loop._invoke` does `"error" in output` on it.
+        if len(structured) == 1 and "result" in structured:
+            return _as_dict(structured["result"])
+        return structured
     text = _text_of(result)
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return {"text": text}
-    return parsed if isinstance(parsed, dict) else {"result": parsed}
+    return _as_dict(parsed)
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """A tool result is always handed to the model as a JSON object."""
+    return value if isinstance(value, dict) else {"result": value}
 
 
 def _text_of(result: Any) -> str:

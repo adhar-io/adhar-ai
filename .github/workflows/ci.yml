@@ -28,3 +28,21 @@ jobs:
         run: |
           uv run adhar-ai tools > /tmp/tools.json
           diff -u contract/tools.json /tmp/tools.json
+
+      - name: End-to-end (seven MCP servers + the runtime, over real HTTP)
+        # The unit suite drives tools in-process and fakes the toolbox, so it
+        # cannot see the defects that only exist once real processes talk to
+        # each other: the transport's Host-header guard, the MCP client's result
+        # unwrapping, and whether an unconfigured backend's error text survives
+        # the trip to the model. Every one of those shipped broken at some point
+        # while the unit suite was green.
+        #
+        # Needs no cluster, no key and no database — what it asserts is either
+        # true offline or honestly reported as unavailable, which is the
+        # property being tested.
+        run: ./hack/e2e-local.sh
+        env:
+          # The platform docs are not checked out here, so grounding falls back
+          # to this repo's own docs tree. The assertion is that lexical
+          # retrieval is LIVE, not how many chunks it found.
+          DOCS: docs

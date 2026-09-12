@@ -12,6 +12,8 @@ into a model context or an audit record.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -23,6 +25,7 @@ from fastapi.responses import JSONResponse
 from ..config import LLMConfig
 from ..provenance import ORIGIN_LABEL_KEY, ORIGIN_LABEL_VALUE
 from .budget import BudgetExceeded, BudgetLedger
+from .cache import ResponseCache, cache_key
 from .providers import load_provider
 from .providers.base import EmbeddingsUnsupported
 from .types import (
@@ -36,12 +39,20 @@ from .types import (
     Usage,
 )
 
+log = logging.getLogger("adhar_ai.gateway")
+
 DEFAULT_TENANT = "anonymous"
 
 
 def create_app(cfg: LLMConfig | None = None) -> FastAPI:
     config = cfg or LLMConfig.from_env()
     ledger = BudgetLedger(config.budgets)
+    #: Caps in-flight upstream calls (`BUDGET_MAX_CONCURRENT_SESSIONS`). Extra
+    #: requests queue rather than being refused: the limit is about not
+    #: stampeding the provider, not about rationing callers, and the token
+    #: budgets above already do the rationing.
+    sessions = asyncio.Semaphore(max(1, config.budgets.max_concurrent_sessions))
+    cache = ResponseCache(enabled=config.response_cache)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -92,6 +103,10 @@ def create_app(cfg: LLMConfig | None = None) -> FastAPI:
         names = await provider().models()
         return ModelList(data=[ModelCard(id=n, owned_by=config.provider) for n in names])
 
+    @app.get("/v1/cache")
+    async def cache_stats() -> dict[str, Any]:
+        return cache.snapshot()
+
     @app.get("/v1/budget")
     async def budget(x_adhar_tenant: str | None = Header(default=None)) -> dict[str, Any]:
         return ledger.snapshot(x_adhar_tenant or DEFAULT_TENANT)
@@ -115,31 +130,52 @@ def create_app(cfg: LLMConfig | None = None) -> FastAPI:
                 status_code=429, detail={"budget": exc.kind, "message": str(exc)}
             ) from exc
 
-        try:
-            result = await provider().chat(
-                messages=body.messages,
-                tools=body.tools,
-                max_tokens=body.max_tokens,
-                model=body.model,
-                temperature=body.temperature,
-                tool_choice=body.tool_choice,
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"{config.provider} backend error: {type(exc).__name__}: {exc}",
-            ) from exc
+        # A verbatim repeat of a deterministic request — a retry after a tool
+        # error, a redelivered operator event — costs nothing. Checked AFTER the
+        # budget so a cached answer cannot be used to evade a rate limit, and
+        # keyed per tenant so it can never disclose one caller's prompt to
+        # another.
+        key = cache_key(tenant, body) if cache.cacheable(body) else ""
+        if key and (hit := cache.get(key)) is not None:
+            return hit
+
+        # `maxConcurrentSessions` was parsed from config and never enforced. It
+        # matters most exactly when it is missing: an agent loop fans out tool
+        # calls, and an upstream provider answers a burst with 429s that look
+        # like the platform's own budget refusing the work. Queueing here turns
+        # that into latency instead.
+        if sessions.locked():
+            log.info("chat request for %s is queued behind %d in flight",
+                     tenant, config.budgets.max_concurrent_sessions)
+        async with sessions:
+            try:
+                result = await provider().chat(
+                    messages=body.messages,
+                    tools=body.tools,
+                    max_tokens=body.max_tokens,
+                    model=body.model,
+                    temperature=body.temperature,
+                    tool_choice=body.tool_choice,
+                )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"{config.provider} backend error: {type(exc).__name__}: {exc}",
+                ) from exc
 
         ledger.record(tenant, result.usage.total_tokens)
-        return ChatCompletionResponse(
+        response = ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:24]}",
             created=int(time.time()),
             model=result.model or config.model,
             choices=[Choice(index=0, message=result.message, finish_reason=result.finish_reason)],
             usage=result.usage,
         )
+        if key:
+            cache.put(key, response)
+        return response
 
     @app.post("/v1/embeddings", response_model=EmbeddingResponse)
     async def embeddings(

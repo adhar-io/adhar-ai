@@ -136,6 +136,34 @@ jobs:
             curl -fsS localhost:18080/healthz >/dev/null 2>&1 && break || sleep 1
           done
           curl -fsS localhost:18080/healthz
+
+          # ...and it must answer an MCP request carrying the Host header it
+          # actually receives in the cluster. agentgateway federates these
+          # servers through a Service backendRef, so the Host is the Service DNS
+          # name or a Pod IP. The MCP SDK's transport defaults to a
+          # localhost-only DNS-rebinding allow-list, which answers every one of
+          # those `421 Invalid Host header` — the entire federated tool surface,
+          # failing in a way that looks like a networking problem. A health
+          # probe cannot catch it, because the probe is the one caller that does
+          # use localhost.
+          for host in \
+            adhar-ai-mcp-cluster.adhar-system.svc.cluster.local:8080 \
+            10.244.1.7:8080
+          do
+            code=$(curl -s -o /tmp/mcp-init.txt -w '%{http_code}' \
+              -X POST localhost:18080/mcp \
+              -H "Host: ${host}" \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json, text/event-stream' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}')
+            echo "MCP initialize with Host=${host} -> ${code}"
+            if [ "${code}" != "200" ]; then
+              echo "::error::MCP server rejected the in-cluster Host ${host} (HTTP ${code})"
+              cat /tmp/mcp-init.txt
+              docker logs mcp || true
+              exit 1
+            fi
+          done
           docker rm -f mcp
 
       - name: Verify the signature is discoverable

@@ -144,9 +144,17 @@ class FakeGateway:
         self.turns = list(turns)
         self.requests: list[dict] = []
 
-    async def chat(self, messages, tools, tenant, model=None, max_tokens=4096):
+    async def chat(self, messages, tools, tenant, model=None, max_tokens=4096, bearer=""):
+        # `bearer` mirrors the real client's signature: in the platform the LLM
+        # gateway runs jwtAuthentication in Strict mode, so the loop must be able
+        # to present a token and the fake must record whether it did.
         self.requests.append(
-            {"messages": list(messages), "tools": list(tools or []), "tenant": tenant}
+            {
+                "messages": list(messages),
+                "tools": list(tools or []),
+                "tenant": tenant,
+                "bearer": bearer,
+            }
         )
         return self.turns.pop(0)
 

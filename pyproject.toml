@@ -16,6 +16,11 @@ dependencies = [
     "anthropic>=0.40",
     "kubernetes>=31.0",
     "pyyaml>=6.0",
+    # Keycloak JWT verification on the runtime's own HTTP surface — the one AI
+    # surface that does not sit behind agentgateway (ADR-0025). It arrived
+    # transitively via `kubernetes`; it is a direct import now, so it is a
+    # direct dependency.
+    "pyjwt[crypto]>=2.9",
 ]
 
 [project.optional-dependencies]

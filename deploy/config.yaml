@@ -4,12 +4,21 @@
 # Deployment does, so local behaviour matches the cluster.
 # -------------------------------------------------------------------------
 # Staged autonomy. Global default is deliberately conservative: `suggest`.
-#   read-only        : investigate + answer; no write tools offered at all
-#   suggest          : write tools allowed, but every write yields a PR and
-#                       pauses for a human merge (assistant-equivalent)
-#   approve-to-apply : write yields a PR; CI may auto-merge under policy
-#   scoped           : narrow, policy-gated auto-merge of PRs on allowlisted
-#                       paths — still a Git PR, never a direct mutation
+# Each rung differs from the one below in a way you can observe:
+#   read-only        : write tools are not offered at all, and are refused if
+#                       called anyway
+#   suggest          : write tools allowed; the FIRST pull request ends the run,
+#                       so a human reads one proposal rather than a chain
+#   approve-to-apply : the run CONTINUES after a pull request, so the agent can
+#                       verify its own proposal; a human still merges every one
+#   scoped           : runs unattended, and is therefore confined to the
+#                       NARROWER writePolicy.scoped allow-list below — which is
+#                       EMPTY by default, so this rung permits no write at all
+#                       until an operator enumerates what it may touch
+#
+# Authority only ever NARROWS. This file sets a ceiling; an operator policy may
+# be stricter; a /chat request may ask for less; and an unauthenticated caller is
+# pinned to read-only regardless. Nothing widens it.
 # -------------------------------------------------------------------------
 autonomy:
   default: suggest
@@ -24,6 +33,16 @@ writePolicy:
   allowedPathPrefixes:
     - "packages/"
     - "environments/"
+  # The NARROWER list that `scoped` autonomy runs under. Left empty on purpose:
+  # `scoped` opens pull requests unattended, so inheriting the broad list above
+  # would be a silent widening. Until these are enumerated, `scoped` refuses
+  # every write and says which field to set. Example:
+  #   scoped:
+  #     allowedRepos: [environments]
+  #     allowedPathPrefixes: ["environments/dev/"]
+  scoped:
+    allowedRepos: []
+    allowedPathPrefixes: []
 # Event-driven operators. Autonomy is per-operator, never above `suggest`
 # here — bump deliberately as trust is calibrated (ADR-0024 consequences).
 operators:
@@ -55,5 +74,9 @@ mcpServers:
 # RAG grounding store (pgvector on CNPG — see pgvector-rag.yaml).
 rag:
   enabled: true
-  database: adhar-ai-rag
   table: kb_chunk
+# Findings survive a restart in this table, on the same database as the RAG
+# index. With no database configured they stay in memory only, and /healthz
+# says so rather than pretending they are durable.
+findings:
+  table: finding

@@ -10,14 +10,22 @@ from .common.tools import access_tools
 
 DOMAIN = "cost"
 
-VALID_DIMENSIONS = (
-    "namespace",
-    "controller",
-    "pod",
-    "node",
-    "cluster",
-    "label:app.kubernetes.io/part-of",
-)
+#: The aggregations OpenCost accepts. A `label:<key>` dimension is open-ended,
+#: so it is matched by prefix. Validating here turns a typo into a named refusal
+#: the model can correct, instead of an OpenCost 400 the model reads as "the
+#: cost backend is broken".
+VALID_DIMENSIONS = ("namespace", "controller", "pod", "node", "cluster", "service")
+LABEL_PREFIX = "label:"
+
+
+def validate_dimension(dimension: str) -> None:
+    if dimension.startswith(LABEL_PREFIX) and len(dimension) > len(LABEL_PREFIX):
+        return
+    if dimension not in VALID_DIMENSIONS:
+        raise ValueError(
+            f"unknown cost dimension {dimension!r}; expected one of "
+            f"{list(VALID_DIMENSIONS)} or 'label:<key>'"
+        )
 
 
 def register(mcp: Any, cfg: MCPConfig) -> None:
@@ -34,6 +42,7 @@ def register(mcp: Any, cfg: MCPConfig) -> None:
         dimension: namespace | controller | pod | node | cluster | label:<key>
         window: OpenCost window, e.g. "24h", "7d", "30d".
         """
+        validate_dimension(dimension)
         payload = await client.allocation(window=window, aggregate=dimension)
         rows = summarize_allocation(payload, top=top)
         return {

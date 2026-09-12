@@ -1,11 +1,23 @@
 """Staged autonomy, read from the `adhar-ai-config` ConfigMap.
 
-The ladder (conservative by default — the ConfigMap ships `suggest`):
+The ladder (conservative by default — the ConfigMap ships `suggest`). Each rung
+differs from the one below it in a way you can observe, not just in its name:
 
-  read-only         investigate and answer; write tools are not even offered
-  suggest           write tools allowed, every write yields a PR and pauses
-  approve-to-apply  write yields a PR; CI may auto-merge under policy
-  scoped            narrow, policy-gated auto-merge on allowlisted paths
+  read-only         write tools are not offered at all, and are refused if
+                    called anyway
+  suggest           write tools allowed; the FIRST pull request ends the run, so
+                    a human reads one proposal rather than a chain of them
+  approve-to-apply  the run CONTINUES after a pull request, so the agent can
+                    verify its own proposal and propose a coherent set; a human
+                    still merges every one
+  scoped            runs unattended, and is therefore confined to the NARROWER
+                    `writePolicy.scoped` allow-list — which is EMPTY by default,
+                    so this rung permits no write at all until an operator
+                    enumerates the repos and paths it may touch
+
+There is deliberately no rung at which the model chooses its own scope. The
+allow-list is read from the ConfigMap, never from a tool argument, because an
+argument is something a prompt injection can set.
 
 Every rung above `read-only` still produces a Git pull request. None of them
 mutates a cluster — that property is structural (the MCP servers expose no
@@ -14,6 +26,7 @@ apply tool at all), not a setting.
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,6 +52,17 @@ def rank(level: str) -> int:
         raise AutonomyError(f"unknown autonomy level {level!r}; expected one of {LADDER}") from exc
 
 
+def lower_of(*levels: str) -> str:
+    """The most conservative of several stages.
+
+    Authority only ever narrows as it flows: the ConfigMap sets a ceiling, a
+    request may ask for less, and an unauthenticated caller is pinned lower
+    still. Combining with `min` rather than trusting the last writer is what
+    stops a request body from widening its own authority.
+    """
+    return LADDER[min(rank(level) for level in levels)]
+
+
 @dataclass(slots=True)
 class OperatorPolicy:
     name: str
@@ -53,8 +77,62 @@ class OperatorPolicy:
 
 @dataclass(slots=True)
 class WritePolicy:
+    """Which repos and paths a proposed change may touch.
+
+    Enforced twice on purpose. The MCP server that owns the PR tool has its own
+    copy of this check (`mcp/common/policy.py`) because it is the process
+    holding the Gitea token, and the runtime checks it again before dispatching
+    because that is where the ConfigMap is actually read — without this, editing
+    `writePolicy` in `adhar-ai-config` changed what `GET /config` printed and
+    nothing else.
+    """
+
     allowed_repos: tuple[str, ...] = ("packages", "environments")
     allowed_path_prefixes: tuple[str, ...] = ("packages/", "environments/")
+    #: The narrower allow-list that `scoped` autonomy runs under. Empty means
+    #: `scoped` permits NOTHING — unattended PRs are opt-in by enumeration, so
+    #: raising the stage without naming the scope fails closed rather than
+    #: silently inheriting the full write policy.
+    scoped_repos: tuple[str, ...] = ()
+    scoped_path_prefixes: tuple[str, ...] = ()
+
+    def scope_for(self, level: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The (repos, path prefixes) pair in force at an autonomy stage."""
+        if level == "scoped":
+            return self.scoped_repos, self.scoped_path_prefixes
+        return self.allowed_repos, self.allowed_path_prefixes
+
+    def refusal(self, level: str, repo: str, paths: list[str]) -> str:
+        """Why this write is out of scope, or `""` when it is permitted.
+
+        The prefix comparison is REPO-QUALIFIED, matching `mcp/common/policy.py`
+        exactly: a tool's `path` argument is relative to its repository, so
+        `security/vault/manifests/x.yaml` in `packages` is checked as
+        `packages/security/vault/manifests/x.yaml`. Comparing the bare path
+        instead would refuse every legitimate change while still admitting
+        anything whose path happened to begin with a repo name — wrong in both
+        directions, and the kind of wrong that only shows up against a real
+        repository layout.
+        """
+        repos, prefixes = self.scope_for(level)
+        if not repos:
+            return (
+                f"autonomy `{level}` has no configured scope on this runtime, so it "
+                "permits no write at all; set writePolicy.scoped in adhar-ai-config"
+            )
+        if repo not in repos:
+            return f"repo {repo!r} is outside this stage's allow-list {list(repos)}"
+        for path in paths:
+            normalized = posixpath.normpath(path.strip().lstrip("/"))
+            if normalized in {".", ""} or normalized == ".." or normalized.startswith("../"):
+                return f"path {path!r} escapes the repository root"
+            qualified = f"{repo}/{normalized}"
+            if prefixes and not any(qualified.startswith(p) for p in prefixes):
+                return (
+                    f"path {path!r} in repo {repo!r} is outside the allowed prefixes "
+                    f"{list(prefixes)}"
+                )
+        return ""
 
 
 @dataclass(slots=True)
@@ -66,8 +144,10 @@ class RuntimeConfig:
     operators: dict[str, OperatorPolicy] = field(default_factory=dict)
     mcp_servers: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MCP_SERVERS))
     rag_enabled: bool = True
-    rag_database: str = "adhar_ai_rag"
     rag_table: str = "kb_chunk"
+    #: Findings survive a restart in this table, on the same CNPG database the
+    #: RAG index uses. No database configured means in-memory only.
+    findings_table: str = "finding"
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> RuntimeConfig:
@@ -96,12 +176,16 @@ class RuntimeConfig:
                 allowed_path_prefixes=tuple(
                     wp.get("allowedPathPrefixes") or ("packages/", "environments/")
                 ),
+                scoped_repos=tuple((wp.get("scoped") or {}).get("allowedRepos") or ()),
+                scoped_path_prefixes=tuple(
+                    (wp.get("scoped") or {}).get("allowedPathPrefixes") or ()
+                ),
             ),
             operators=operators,
             mcp_servers={**DEFAULT_MCP_SERVERS, **(data.get("mcpServers") or {})},
             rag_enabled=bool(rag.get("enabled", True)),
-            rag_database=str(rag.get("database", "adhar_ai_rag")),
             rag_table=str(rag.get("table", "kb_chunk")),
+            findings_table=str((data.get("findings") or {}).get("table", "finding")),
         )
 
     @classmethod

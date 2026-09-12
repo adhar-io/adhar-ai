@@ -16,6 +16,9 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
+from mcp.server.mcpserver.exceptions import ToolError
+
+from ...clients.errors import BackendNotConfigured, WriteNotPermitted
 from ...provenance import ORIGIN_LABEL_KEY, ORIGIN_LABEL_VALUE
 
 _logger = logging.getLogger("adhar_ai.audit")
@@ -55,6 +58,33 @@ def emit(**fields: Any) -> None:
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
 
+#: Failures Adhar ANTICIPATES, whose message the model is meant to read.
+#:
+#: The MCP SDK splits tool failures in two: a `ToolError` is an expected
+#: outcome and its message is returned to the client, while any other exception
+#: is a crash whose text is withheld — the model sees only "Error executing tool
+#: <name>". `BackendNotConfigured` was landing in the second bucket, so the one
+#: property `clients/errors.py` exists to provide was lost at the boundary: the
+#: agent could not distinguish "Prometheus is not configured here" from "the
+#: tool crashed", and the system prompt's instruction to say so plainly had
+#: nothing to say it from.
+EXPECTED_FAILURES: tuple[type[Exception], ...] = (
+    BackendNotConfigured,
+    WriteNotPermitted,
+    ValueError,
+    KeyError,
+)
+
+
+def _expected(exc: Exception) -> Exception:
+    """Re-raise an anticipated failure as a `ToolError` so its text survives."""
+    if isinstance(exc, ToolError):
+        return exc
+    if isinstance(exc, EXPECTED_FAILURES):
+        return ToolError(f"{type(exc).__name__}: {exc}")
+    return exc
+
+
 def audited(access: str, domain: str) -> Callable[[F], F]:
     """Decorator emitting `{audit_id, tool, access, domain, args, decision}`.
 
@@ -80,7 +110,7 @@ def audited(access: str, domain: str) -> Callable[[F], F]:
                     error=f"{type(exc).__name__}: {exc}",
                     duration_ms=round((time.monotonic() - started) * 1000, 1),
                 )
-                raise
+                raise _expected(exc) from exc
             emit(
                 audit_id=audit_id,
                 tool=fn.__name__,

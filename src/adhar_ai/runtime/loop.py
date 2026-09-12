@@ -25,7 +25,7 @@ import httpx
 from ..config import DEFAULT_MODELS, openai_v1_base
 from ..gateway.types import Message, ToolCall, ToolSpec
 from ..mcp.common.audit import emit, new_audit_id
-from .autonomy import RuntimeConfig, rank
+from .autonomy import RuntimeConfig, WritePolicy, rank
 from .toolbox import MCPToolbox
 
 log = logging.getLogger("adhar_ai.loop")
@@ -60,10 +60,46 @@ class Session:
     max_steps: int = 12
     max_tool_calls: int = 40
     grounding: list[str] = field(default_factory=list)
+    #: The repo/path allow-list this session's writes must satisfy. Supplied by
+    #: the caller from `adhar-ai-config`; `None` leaves enforcement entirely to
+    #: the MCP server that holds the Gitea token.
+    write_policy: WritePolicy | None = None
+    #: Bearer presented to the LLM gateway. In the platform that gateway runs
+    #: `jwtAuthentication: Strict` across the whole Gateway, so a request with
+    #: no token is a 401 and the loop cannot run at all — and its token budgets
+    #: are metered per Keycloak group, so the identity has to be the caller's
+    #: wherever there is one. Empty against the bundled local-dev gateway, which
+    #: requires no token.
+    bearer: str = ""
 
     @property
     def may_write(self) -> bool:
         return rank(self.autonomy) > rank("read-only")
+
+    @property
+    def stop_after_write(self) -> bool:
+        """At `suggest`, the first pull request ends the run.
+
+        This is what separates `suggest` from `approve-to-apply`: a human being
+        asked to review is shown one proposal, not whatever the model decided to
+        chain onto it. Above this rung the run continues so the agent can check
+        its own work.
+        """
+        return self.autonomy == "suggest"
+
+    def write_refusal(self, args: dict[str, Any]) -> str:
+        """Why this write's arguments are out of policy, or `""` if they are in."""
+        if self.write_policy is None:
+            return ""
+        repo = str(args.get("repo") or "packages")
+        paths = [
+            str(change.get("path", ""))
+            for change in (args.get("changes") or [])
+            if isinstance(change, dict)
+        ]
+        if (path := args.get("path")) and isinstance(path, str):
+            paths.append(path)
+        return self.write_policy.refusal(self.autonomy, repo, paths)
 
 
 @dataclass(slots=True)
@@ -132,6 +168,7 @@ class GatewayClient:
         tenant: str,
         model: str | None = None,
         max_tokens: int = 4096,
+        bearer: str = "",
     ) -> dict[str, Any]:
         if not self.api_base:
             raise RuntimeError("LLM_GATEWAY_URL is not set; the agent loop cannot run")
@@ -147,10 +184,16 @@ class GatewayClient:
         }
         if tools:
             body["tools"] = [t.model_dump() for t in tools]
+        headers = {"X-Adhar-Tenant": tenant}
+        if bearer:
+            # agentgateway validates this and reads its `groups` claim for the
+            # per-group token budget. Omitting it is a 401 in the platform; the
+            # bundled local-dev gateway ignores it.
+            headers["Authorization"] = f"Bearer {bearer}"
         resp = await self._http().post(
             f"{self.api_base}/chat/completions",
             json=body,
-            headers={"X-Adhar-Tenant": tenant},
+            headers=headers,
         )
         if resp.status_code == 429:
             raise BudgetExhausted(resp.text)
@@ -194,7 +237,11 @@ async def run(
         result.steps = step + 1
         try:
             payload = await gateway.chat(
-                messages, specs, tenant=session.tenant, model=session.model
+                messages,
+                specs,
+                tenant=session.tenant,
+                model=session.model,
+                bearer=session.bearer,
             )
         except BudgetExhausted as exc:
             result.kind, result.error = "budget_exhausted", str(exc)
@@ -230,7 +277,11 @@ async def run(
                     content=json.dumps(output, default=str)[:20000],
                 )
             )
-        if result.kind == "budget_exhausted":
+            if result.pull_requests and session.stop_after_write:
+                # `suggest`: one proposal, then stop and hand it to a human.
+                result.kind = "proposed"
+                break
+        if result.kind in ("budget_exhausted", "proposed"):
             break
     else:
         result.error = f"step limit ({session.max_steps}) reached without a final answer"
@@ -278,6 +329,23 @@ async def _invoke(
         }
         result.tool_calls.append({"tool": name, "args": args, "decision": "denied"})
         emit(audit_id=audit_id, tool=name, access="write", decision="denied", args=args)
+        return denial
+
+    if tool is not None and tool.is_write and (why := session.write_refusal(args)):
+        # The ConfigMap's writePolicy, enforced where the ConfigMap is read. The
+        # MCP server checks the same thing again before it touches Gitea; this
+        # one exists so the policy an operator edits is the policy that runs.
+        denial = {"error": f"denied by writePolicy: {why}"}
+        result.tool_calls.append({"tool": name, "args": args, "decision": "denied"})
+        emit(
+            audit_id=audit_id,
+            tool=name,
+            access="write",
+            decision="denied",
+            reason=why,
+            autonomy=session.autonomy,
+            args=args,
+        )
         return denial
 
     try:

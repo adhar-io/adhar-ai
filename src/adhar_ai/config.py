@@ -44,6 +44,14 @@ def env_bool(*names: str, default: bool = False) -> bool:
     return raw.lower() in {"1", "true", "yes", "on", "enabled"}
 
 
+def env_list(*names: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Comma-separated env value as a tuple, with blanks dropped."""
+    raw = env(*names)
+    if not raw:
+        return default
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 def env_int(*names: str, default: int) -> int:
     raw = env(*names)
     try:
@@ -168,6 +176,29 @@ class MCPConfig:
     #: for running a server standalone in development.
     oidc_issuer_url: str = ""
     oidc_client_id: str = ""
+    #: Host header allow-list for the MCP transport's DNS-rebinding guard.
+    #:
+    #: The MCP SDK defaults this to localhost only, which is right for a laptop
+    #: and WRONG in a Pod: agentgateway federates these servers by Service
+    #: `backendRef`, so requests arrive with a Host of
+    #: `adhar-ai-mcp-<domain>.adhar-system.svc.cluster.local:8080`, the Pod IP,
+    #: or whatever the proxy chose — a set that cannot be enumerated ahead of
+    #: time. Under the SDK default every one of those is answered `421 Invalid
+    #: Host header`, which takes out the entire federated tool surface.
+    #:
+    #: `("*",)` — the default — turns the guard off. That is a deliberate,
+    #: narrow trade: DNS rebinding is a *browser* attack against a loopback-bound
+    #: dev server, and there is no browser on a Pod's loopback. In the platform
+    #: the real boundary is the one ADR-0025 put in front of all seven servers:
+    #: agentgateway validates the Keycloak JWT and authorizes per tool. Set
+    #: `ADHAR_AI_MCP_ALLOWED_HOSTS` to a comma-separated list to switch the
+    #: guard back on when a server is exposed some other way.
+    allowed_hosts: tuple[str, ...] = ("*",)
+
+    @property
+    def dns_rebinding_protection(self) -> bool:
+        """True when `allowed_hosts` is a real allow-list rather than `*`."""
+        return "*" not in self.allowed_hosts
 
     @classmethod
     def from_env(cls, domain: str | None = None) -> MCPConfig:
@@ -192,6 +223,11 @@ class MCPConfig:
             # manifests no longer set these at all and they are normally empty.
             oidc_issuer_url=env("OIDC_ISSUER_URL"),
             oidc_client_id=env("OIDC_CLIENT_ID", default="adhar-ai"),
+            allowed_hosts=env_list(
+                "ADHAR_AI_MCP_ALLOWED_HOSTS",
+                "MCP_ALLOWED_HOSTS",
+                default=("*",),
+            ),
         )
 
 
