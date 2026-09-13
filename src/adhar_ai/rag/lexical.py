@@ -33,7 +33,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .index import Chunk, collect
+from .documents import Chunk, Document
 
 log = logging.getLogger("adhar_ai.rag")
 
@@ -92,15 +92,44 @@ class LexicalIndex:
 
     @classmethod
     def from_path(cls, docs_path: str | Path) -> LexicalIndex:
-        """Build from the same docs tree the pgvector indexer walks."""
-        try:
-            chunks = collect(docs_path)
-        except OSError as exc:
-            log.warning("lexical index could not read %s: %s", docs_path, exc)
+        """Build from the docs tree, synchronously.
+
+        `DocsSource` is async because most sources do I/O over the network; this
+        one only reads files, so the walk is inlined here rather than forcing
+        every caller of a purely-CPU index build into an event loop.
+        """
+        from .sources import classify_doc
+
+        root = Path(docs_path)
+        if not root.exists():
+            log.info("docs path %s does not exist; lexical index is empty", root)
             return cls()
+        files = sorted(root.rglob("*.md")) if root.is_dir() else [root]
+        chunks: list[Chunk] = []
+        for file in files:
+            try:
+                text = file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not text.strip():
+                continue
+            rel = str(file.relative_to(root)) if root.is_dir() else file.name
+            chunks.extend(
+                Document(
+                    doc_id=f"docs:{rel}",
+                    source=rel,
+                    text=text,
+                    kind=classify_doc(file),
+                    origin="docs",
+                ).chunks()
+            )
         index = cls.from_chunks(chunks)
         log.info("lexical index built: %d chunks from %s", index.size, docs_path)
         return index
+
+    def chunks(self) -> list[Chunk]:
+        """The chunks currently indexed, so callers can add to them."""
+        return [d.chunk for d in self.docs]
 
     def _idf(self, term: str) -> float:
         # Robertson/Sparck-Jones IDF, floored at zero so a term present in every

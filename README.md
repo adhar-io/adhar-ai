@@ -167,25 +167,73 @@ With **no credential at all**, a caller is still answered — and pinned to
 the request outright instead, which is the right posture once the platform's own
 clients are wired up.
 
+### The runtime's HTTP surface
+
+| Route | What it does |
+|---|---|
+| `GET /healthz` | posture: connected MCP servers, grounding mode, auth, findings store |
+| `GET /config` | the effective autonomy policy, read back |
+| `POST /chat` | one agent run — an answer, or a proposed pull request |
+| `POST /operators/{name}/event` | operator webhook (Alertmanager, ArgoCD notifications) |
+| `GET /findings` | what the operators concluded |
+| `GET /knowledge` | what the knowledge base holds, by origin and kind |
+| `POST /knowledge` | add a note, runbook or incident write-up |
+| `POST /knowledge/search` | retrieve grounding without running the agent |
+| `POST /knowledge/refresh` | re-derive knowledge now |
+| `POST /feedback` | say whether an answer's grounding helped |
+
+`/healthz` is the only one left open — it is the readiness probe, and it
+presents no credential. Everything else is gated, so
+`ADHAR_AI_REQUIRE_AUTH=true` closes every route that carries cluster detail.
+
 👉 Threat model and controls: **[docs/SECURITY.md](docs/SECURITY.md)**
 
 ---
 
-## 📚 Grounding
+## 📚 Grounding — a knowledge base, not a docs folder
 
-Retrieval runs over the platform's own docs, ADRs and runbooks. Two paths, and
-the second is what makes an **unkeyed** platform still useful:
+An agent that only knows Kubernetes in general is a search engine with extra
+steps. Adhar AI builds a **knowledge base of your platform** and keeps it
+current. Six sources, re-derived on a schedule:
 
-- **Vector** — chunks embedded through the gateway into pgvector (the
-  `adhar-ai-rag` CNPG database), queried by cosine distance. `adhar-ai index
-  --docs <path>` re-indexes.
-- **Lexical** — a dependency-free BM25 index built in-process from the same docs
-  tree. It needs no key and no database, so it answers when there is no provider
-  key, no CNPG, an empty table mid-first-index, or a database that has started
-  failing.
+| Source | What it answers |
+|---|---|
+| 📘 **Documentation** | "why is it built this way", "how do I do X" |
+| 🧰 **Tool inventory** | "what can you actually do for me" |
+| 📦 **Package catalogue** | "what is installed, what does it depend on" |
+| ☸️ **Live cluster** | "what is running right now, and is it healthy" |
+| 🔍 **Operator findings** | "has the platform noticed this before" |
+| 📝 **Human notes** | "what did we decide, and what did we learn" |
 
-Every grounding block names the source **and which path found it**, and
-`GET /healthz` reports the live mode. Answers cite what they were grounded on.
+**Retrieval is hybrid.** Vector similarity finds things phrased differently from
+the question; Postgres full-text finds the exact identifier the user typed
+(`CreateContainerConfigError`, `CompositeCluster`) that an embedding blurs away.
+Platform questions contain a lot of exact identifiers, so the two are fused by
+reciprocal rank rather than chosen between.
+
+**It learns.** Notes are indexed the moment they are written, so a postmortem
+typed at 02:00 is retrievable at 02:01. Every operator finding is fed back, so
+the next similar alert retrieves what the last investigation concluded. And every
+answer returns the chunk ids behind it, so `POST /feedback` teaches the ranking
+what actually helped.
+
+**It is incremental**, which is what makes keeping it current affordable. A
+refresh re-embeds only what changed — measured on Adhar's own corpus, a second
+pass over 1,299 chunks rewrote nothing and made zero embedding calls.
+
+**It degrades without a cliff:**
+
+| You have | You get |
+|---|---|
+| pgvector + an embedding endpoint | hybrid vector and lexical retrieval |
+| pgvector, no provider key | full-text over the same indexed corpus |
+| no database | in-process BM25 over the docs tree |
+| no docs either | honest: "no grounding is available" |
+
+So an unkeyed platform is still grounded. `GET /healthz` says which rung you are
+on, and every grounding block names its source *and* which path found it.
+
+👉 Full detail: **[docs/KNOWLEDGE.md](docs/KNOWLEDGE.md)**
 
 ---
 
@@ -215,7 +263,8 @@ uv sync --extra rag                    # Python 3.12+
 uv run adhar-ai tools                  # the tool inventory — no cluster needed
 uv run adhar-ai mcp --domain cluster   # :8081/mcp
 uv run adhar-ai runtime                # :8082
-docker compose up                      # gateway + one MCP server + pgvector
+docker compose up                      # the whole stack: gateway, all seven
+                                       # MCP servers, the runtime and pgvector
 ```
 
 Then ask it something:
@@ -238,20 +287,63 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 | 🚀 **[Getting Started](docs/GETTING_STARTED.md)** | From `uv sync` to a grounded answer to an opened PR, step by step |
 | 🏛️ **[Architecture](docs/ARCHITECTURE.md)** | How the three components, the seven servers and the data plane fit together |
 | 🧰 **[Tool Reference](docs/TOOLS.md)** | Every one of the 27 tools: arguments, backend, failure mode |
+| 🧠 **[Knowledge Base](docs/KNOWLEDGE.md)** | What the agent knows, how it stays current, and how it learns |
 | ⚙️ **[Operations](docs/OPERATIONS.md)** | Every setting, the health surface, and how to diagnose it when it is wrong |
 | 🔐 **[Security](docs/SECURITY.md)** | Threat model, the write path, authentication, autonomy, prompt injection |
 | 🤝 **[Contributing](CONTRIBUTING.md)** | Adding a tool or an operator without breaking the guarantees |
 
 ---
 
-## 🧪 Development
+## 🧪 Development and verification
 
 ```bash
 uv sync --extra rag
-uv run pytest -q                       # 260 tests
+uv run pytest -q                       # 266 tests (13 more with a database)
 uv run ruff check src tests
 uv run mypy src
 uv run adhar-ai tools | diff -u contract/tools.json -   # the Go-CLI contract
+```
+
+The last one is not a formatting check. `contract/tools.json` is the schema
+snapshot the Adhar Go CLI is written against, so a diff there is a breaking
+change rather than a refactor.
+
+### Beyond the unit suite
+
+Unit tests drive tools in-process and fake the toolbox, which is fast and blind
+to a whole class of defect. Every bug in the list below was found by something
+in this section while the unit suite was green, so both harnesses are worth
+running.
+
+```bash
+./hack/e2e-local.sh
+```
+
+Stands up all seven MCP servers and the runtime over **real HTTP** and asserts
+the seam between them: the transport's Host-header handling, the MCP client's
+result unwrapping, and whether an unconfigured backend's error text survives the
+trip to the model. It needs no cluster, no key and no database — what it asserts
+is either true offline or honestly reported as unavailable, which is the property
+being tested. It runs in CI.
+
+```bash
+docker run -d --name adhar-rag -p 15432:5432 \
+  -e POSTGRES_USER=adhar_ai -e POSTGRES_PASSWORD=adhar_ai \
+  -e POSTGRES_DB=adhar_ai_rag pgvector/pgvector:pg16
+
+ADHAR_AI_RAG_DSN=postgresql://adhar_ai:adhar_ai@127.0.0.1:15432/adhar_ai_rag \
+  uv run hack/verify-knowledge.py --docs ../adhar/docs \
+  --packages ../adhar/platform/stack/packages
+```
+
+Checks the knowledge base against a **real pgvector**: schema, ingestion from
+every source, incrementality, hybrid retrieval, exact-identifier lookup,
+immediate note availability, feedback ranking and deletion propagation. The same
+database makes the 13 skipped tests run:
+
+```bash
+ADHAR_AI_TEST_DSN=postgresql://adhar_ai:adhar_ai@127.0.0.1:15432/adhar_ai_rag \
+  uv run pytest -q                     # 279 passed
 ```
 
 `LLM_GATEWAY_URL` defaults to the platform data plane
@@ -300,18 +392,51 @@ through Gateway API. It is the production data plane for both AI protocols:
 ## 📍 Project status
 
 Against the [platform roadmap](https://github.com/adhar-io/adhar/blob/main/docs/ROADMAP.md)'s
-Phase 3 agentic entry:
+Phase 3 agentic entry.
 
 | Capability | Status |
 |---|---|
-| MCP-native tools, 7 domains, PR-only writes | ✅ implemented, 260 tests |
-| Federated MCP over streamable HTTP at `/mcp` | ✅ verified against in-cluster Host headers |
+| MCP-native tools, 7 domains, PR-only writes | ✅ 266 tests, 279 with a database |
+| Federated MCP over streamable HTTP at `/mcp` | ✅ verified against the Host headers a Pod actually receives |
 | GitOps-safe runtime, four-rung autonomy ladder | ✅ each rung behaviourally distinct and tested |
-| Authentication on the runtime's own surface | ✅ Keycloak JWT + webhook token |
-| Grounding (pgvector + lexical fallback) | ✅ lexical verified on 1,051 real doc chunks |
+| Authentication on the runtime's own surface | ✅ Keycloak JWT, webhook token, outbound service-account token |
+| Knowledge base — 6 sources, hybrid retrieval, learning loop | ✅ verified against a real pgvector: 1,299 chunks, 0 re-embeds on an unchanged pass |
 | Durable findings | ✅ Postgres-backed, degrades to memory |
-| **Container images on GHCR** | ⏳ **the remaining gate** — `.github/workflows/images.yml` builds, signs and SBOMs them; it has not been run |
-| End-to-end run with a real LLM key | ⏳ needs a keyed cluster |
+| **Live run against a real LLM and a real cluster** | ✅ **see below** |
+| **Container images on GHCR** | ⏳ **the remaining gate** |
+| GPU run of the `ai/vllm` profile | ⏳ needs a GPU node pool |
+
+### What a live run proved
+
+Exercised against a real LLM through the gateway, a real bootstrapping Adhar
+cluster and a real Gitea — not mocks:
+
+- **The agent diagnosed a live cluster.** Three tool calls against a
+  half-bootstrapped `adhar-system`, and every specific claim checked out: a
+  missing `argocd-redis` Secret, Cilium returning
+  `putEndpointIdTooManyRequests`, and a dex container exiting 20.
+- **It refused to invent data.** Asked for CPU figures with no Prometheus
+  configured, it named the backend and the environment variable that fixes it
+  rather than producing a number.
+- **It opened a real pull request.** Correct `adhar-ai/` branch, `adhar-ai`
+  label, provenance block with an audit id, commit trailer — and `main`
+  untouched, which is the guarantee that matters.
+- **Embeddings are real.** 1536 dimensions with genuine semantic structure: a
+  paraphrase scored 0.39 against its original where unrelated text scored 0.12.
+
+That run also found four defects the unit suite could not, all since fixed:
+
+| Defect | Why it mattered |
+|---|---|
+| The Gitea client doubled `/api/v1` | the first real pull request 404'd, and the docs told you to configure it the broken way |
+| MCP sessions never recovered from a server restart | a rolling Deployment cost that domain its tools forever, while `/healthz` still called it connected |
+| A transport failure raised `CancelledError` | `except Exception` does not catch it, so it killed the whole agent run |
+| The runtime sent no bearer to the LLM gateway | which runs JWT validation in `Strict` mode, so no agent run could reach a model |
+
+**Still outstanding.** The images are not published, so the platform package has
+nothing to pull and the components have not run *as Deployments in a cluster* —
+the live run drove them from a workstation against that cluster's services. The
+build, sign and SBOM workflow is committed and its smoke test passes locally.
 
 ---
 

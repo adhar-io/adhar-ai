@@ -56,6 +56,11 @@ class GatewayEmbeddings:
         self.base_url = base_url.rstrip("/")
         self.api_base = openai_v1_base(base_url)
         self._client = client
+        #: Filled in from the gateway's own response. The knowledge store records
+        #: it per row so that a change of embedding model BEHIND the gateway is
+        #: detected and the affected rows are re-embedded — vectors from two
+        #: models share no space, and mixing them degrades retrieval silently.
+        self.model = ""
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -65,7 +70,10 @@ class GatewayEmbeddings:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         resp = await self._http().post(f"{self.api_base}/embeddings", json={"input": texts})
         resp.raise_for_status()
-        rows = sorted(resp.json().get("data") or [], key=lambda d: int(d.get("index", 0)))
+        payload = resp.json()
+        if reported := str(payload.get("model") or ""):
+            self.model = reported
+        rows = sorted(payload.get("data") or [], key=lambda d: int(d.get("index", 0)))
         return [_fit([float(v) for v in row["embedding"]]) for row in rows]
 
     async def aclose(self) -> None:
@@ -95,14 +103,33 @@ class LocalEmbeddings:
         return [_fit([float(v) for v in row]) for row in vectors]
 
 
-async def load_embeddings(gateway_url: str) -> EmbeddingBackend:
-    """Probe the gateway; fall back to local only if it cannot embed."""
+async def load_embeddings(gateway_url: str) -> EmbeddingBackend | None:
+    """The best available embedder, or `None` if there is none.
+
+    Returns `None` rather than raising, because "no embedder" is a degradation
+    the knowledge base handles well and a crash is not. Without one, pgvector
+    still answers from its full-text index over the SAME indexed corpus — the
+    whole platform, not just the docs tree the in-process index covers — so an
+    unkeyed install with a database keeps far more grounding than it would if a
+    missing optional dependency took the runtime down.
+
+    Order: the gateway (which is where a key would be), then a local model, then
+    nothing.
+    """
     if gateway_url:
         backend = GatewayEmbeddings(gateway_url)
         try:
             await backend.embed(["adhar ai readiness probe"])
             return backend
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.info("gateway embeddings unavailable (%s); trying local fallback", exc)
             await backend.aclose()
-    return LocalEmbeddings()
+    try:
+        return LocalEmbeddings()
+    except Exception as exc:  # noqa: BLE001 - the optional extra is absent
+        log.info(
+            "no embedding backend available (%s); the knowledge base will use "
+            "full-text retrieval only",
+            exc,
+        )
+        return None

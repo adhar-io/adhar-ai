@@ -82,6 +82,27 @@ def openai_v1_base(url: str) -> str:
     return base if base.endswith("/v1") else f"{base}/v1"
 
 
+def gitea_api_base(url: str) -> str:
+    """Normalize a Gitea base URL so it ends in exactly one `/api/v1`.
+
+    The same trap `openai_v1_base` exists for, one URL over. The platform
+    manifests and `docker compose` both set a BARE origin
+    (`http://gitea-http.adhar-system.svc.cluster.local:3000`) and the client
+    appends the API prefix — but the prose in this repo told operators to set it
+    *with* `/api/v1` already on, which produced
+
+        http://gitea:3000/api/v1/api/v1/repos/adhar/packages/branches  ->  404
+
+    on the first write the agent ever attempted. Accepting both shapes costs one
+    branch and removes a class of setup failure that only surfaces at the moment
+    the agent tries to open its first pull request.
+    """
+    base = (url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    return base if base.endswith("/api/v1") else f"{base}/api/v1"
+
+
 def parse_listen(listen: str, default_port: int = 8080) -> tuple[str, int]:
     """Parse a Go-style listen address (`:8080`, `0.0.0.0:8080`, `8080`)."""
     listen = (listen or "").strip()

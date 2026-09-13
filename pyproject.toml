@@ -56,6 +56,11 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    # Spawns real MCP server processes, so it costs seconds rather than
+    # milliseconds. Run the fast suite with: pytest -m "not slow"
+    "slow: drives real subprocesses over real HTTP",
+]
 
 [tool.mypy]
 python_version = "3.12"

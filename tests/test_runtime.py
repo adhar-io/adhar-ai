@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 
 from adhar_ai.config import DEFAULT_MODELS, PLATFORM_LLM_GATEWAY_URL, RuntimeEnv
 from adhar_ai.gateway.types import FunctionSpec, ToolSpec
-from adhar_ai.rag.index import chunk_markdown, classify, collect
+from adhar_ai.rag import Document
+from adhar_ai.rag.sources import DocsSource, classify_doc
 from adhar_ai.runtime.app import create_app
 from adhar_ai.runtime.autonomy import AutonomyError, RuntimeConfig, rank
 from adhar_ai.runtime.loop import GatewayClient, Session, run
@@ -108,6 +109,9 @@ class FakeToolbox:
         self.errors: dict[str, str] = {}
         self.invoked: list[tuple[str, dict]] = []
         self.results = results or {}
+        # Mirrors the real toolbox: `/healthz` derives connectivity from live
+        # sessions, so the fake has to expose the same two attributes.
+        self.servers = {"gitops": "http://gitops", "cost": "http://cost"}
         self._tools = {
             "app_status": RemoteTool("app_status", "gitops", "status", {}, "read"),
             "sync_status": RemoteTool("sync_status", "gitops", "fleet", {}, "read"),
@@ -118,6 +122,14 @@ class FakeToolbox:
     @property
     def tools(self):
         return self._tools
+
+    @property
+    def unhealthy(self) -> list[str]:
+        return sorted(self.errors)
+
+    async def reconnect(self, domain: str) -> bool:
+        self.errors.pop(domain, None)
+        return True
 
     def specs(self, allowed=(), include_writes=True):
         return [
@@ -456,12 +468,16 @@ def test_unknown_operator_is_a_404(runtime_client):
     assert "alert-triage" in resp.json()["detail"]["available"]
 
 
-# --------------------------------------------------------------------- RAG --
+# --------------------------------------------------------------- knowledge --
 
 
-def test_chunk_markdown_splits_on_headings_and_cites_sections():
+def _chunks(text: str, source: str, kind: str = "doc"):
+    return Document(doc_id=source, source=source, text=text, kind=kind).chunks()
+
+
+def test_chunking_splits_on_headings_and_cites_sections():
     text = "# Title\n\nintro\n\n## Decision\n\nPR-only writes.\n\n## Consequences\n\nSafe."
-    chunks = chunk_markdown(text, "docs/adr/0024.md", "adr")
+    chunks = _chunks(text, "docs/adr/0024.md", "adr")
     sources = [c.source for c in chunks]
     assert "docs/adr/0024.md#Decision" in sources
     assert "docs/adr/0024.md#Consequences" in sources
@@ -469,33 +485,54 @@ def test_chunk_markdown_splits_on_headings_and_cites_sections():
 
 
 def test_long_sections_are_split_under_the_chunk_cap():
-    from adhar_ai.rag.index import MAX_CHARS
+    from adhar_ai.rag.documents import MAX_CHARS
 
     body = "\n\n".join(["paragraph " * 40] * 20)
-    chunks = chunk_markdown(f"## Big\n\n{body}", "docs/x.md")
+    chunks = _chunks(f"## Big\n\n{body}", "docs/x.md")
     assert len(chunks) > 1
     assert all(len(c.text) <= MAX_CHARS + 200 for c in chunks)
 
 
-def test_classify_recognises_adrs_and_runbooks(tmp_path):
+def test_chunk_indexes_are_contiguous_from_zero():
+    """`(doc_id, chunk_index)` is the upsert key: a gap or a repeat would make a
+    refresh write the wrong row."""
+    chunks = _chunks("# A\n\none\n\n## B\n\ntwo\n\n## C\n\nthree", "docs/x.md")
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
+
+
+def test_the_content_hash_changes_with_the_text_and_the_citation():
+    """It is what decides whether a chunk is re-embedded on the next refresh."""
+    first = _chunks("## A\n\nbody", "docs/x.md")[0]
+    same = _chunks("## A\n\nbody", "docs/x.md")[0]
+    edited = _chunks("## A\n\nbody changed", "docs/x.md")[0]
+    moved = _chunks("## A\n\nbody", "docs/moved.md")[0]
+    assert first.content_hash == same.content_hash
+    assert first.content_hash != edited.content_hash
+    assert first.content_hash != moved.content_hash
+
+
+def test_classify_recognises_adrs_and_runbooks():
     from pathlib import Path
 
-    assert classify(Path("docs/adr/0024-x.md")) == "adr"
-    assert classify(Path("docs/runbooks/restore.md")) == "runbook"
-    assert classify(Path("docs/ARCHITECTURE.md")) == "doc"
+    assert classify_doc(Path("docs/adr/0024-x.md")) == "adr"
+    assert classify_doc(Path("docs/runbooks/restore.md")) == "runbook"
+    assert classify_doc(Path("docs/incidents/2026-01-outage.md")) == "incident"
+    assert classify_doc(Path("docs/ARCHITECTURE.md")) == "doc"
 
 
-def test_collect_walks_a_docs_tree(tmp_path):
+async def test_the_docs_source_walks_a_tree(tmp_path):
     (tmp_path / "adr").mkdir()
     (tmp_path / "adr" / "0024.md").write_text("# ADR\n\n## Decision\n\nPR-only.")
     (tmp_path / "README.md").write_text("# Readme\n\nhello")
-    chunks = collect(tmp_path)
+    docs = await DocsSource(tmp_path).documents()
+    chunks = [c for d in docs for c in d.chunks()]
     assert {c.kind for c in chunks} == {"adr", "doc"}
     assert any("0024.md#Decision" in c.source for c in chunks)
+    assert all(c.origin == "docs" for c in chunks)
 
 
-def test_collect_on_a_missing_path_is_empty_not_an_error(tmp_path):
-    assert collect(tmp_path / "absent") == []
+async def test_a_missing_docs_path_is_empty_not_an_error(tmp_path):
+    assert await DocsSource(tmp_path / "absent").documents() == []
 
 
 # ---------------------------------------------- talking to the platform gateway --

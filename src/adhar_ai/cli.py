@@ -17,7 +17,7 @@ import os
 import sys
 from collections.abc import Sequence
 
-from .config import DOMAINS, LLMConfig, MCPConfig, RuntimeEnv, parse_listen
+from .config import DOMAINS, LLMConfig, MCPConfig, RuntimeEnv, env, parse_listen
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
@@ -38,9 +38,21 @@ def build_parser() -> argparse.ArgumentParser:
     runtime.add_argument("--config", default=os.environ.get("ADHAR_AI_CONFIG"))
     runtime.add_argument("--listen", default=":8080")
 
-    index = sub.add_parser("index", help="re-index the docs tree into pgvector (RAG)")
-    index.add_argument("--docs", default=None)
-    index.add_argument("--dsn", default=None)
+    index = sub.add_parser(
+        "index", help="re-derive the knowledge base from the platform (RAG)"
+    )
+    index.add_argument("--docs", default=None, help="docs tree to index")
+    index.add_argument("--dsn", default=None, help="pgvector DSN")
+    index.add_argument(
+        "--packages", default=None, help="package tree whose adhar-package.yaml files to index"
+    )
+    index.add_argument(
+        "--source",
+        action="append",
+        default=None,
+        metavar="ORIGIN",
+        help="only this origin (docs, tools, packages, notes); repeatable",
+    )
 
     sub.add_parser("tools", help="print the tool inventory of every domain and exit")
     return parser
@@ -53,7 +65,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "tools":
         return _print_tools()
     if args.command == "index":
-        return _reindex(args.docs, args.dsn)
+        return _reindex(args.docs, args.dsn, args.packages, tuple(args.source or ()))
 
     import uvicorn
 
@@ -123,25 +135,58 @@ def _print_tools() -> int:
     return 0
 
 
-def _reindex(docs: str | None, dsn: str | None) -> int:
+def _reindex(
+    docs: str | None,
+    dsn: str | None,
+    packages: str | None = None,
+    sources: tuple[str, ...] = (),
+) -> int:
+    """Re-derive the knowledge base. This is what the nightly CronOperation runs.
+
+    Incremental: content whose hash is unchanged is never re-embedded, so a
+    scheduled run over a corpus that barely moved costs almost nothing. That is
+    what makes it affordable to schedule at all.
+    """
     import asyncio
 
-    from .rag import ingest_path, load_embeddings
+    from .rag import KnowledgeBase, load_embeddings
     from .runtime.autonomy import RuntimeConfig
 
     environment = RuntimeEnv.from_env()
     cfg = RuntimeConfig.load(os.environ.get("ADHAR_AI_CONFIG"))
     target_dsn = dsn or environment.rag_dsn
-    target_docs = docs or environment.docs_path
     if not target_dsn:
-        print("no RAG DSN: set ADHAR_AI_RAG_DSN or pass --dsn", file=sys.stderr)
+        print("no knowledge DSN: set ADHAR_AI_RAG_DSN or pass --dsn", file=sys.stderr)
         return 2
 
     async def go() -> int:
-        embeddings = await load_embeddings(environment.llm_gateway_url)
-        count = await ingest_path(target_dsn, target_docs, embeddings, table=cfg.rag_table)
-        print(f"indexed {count} chunks from {target_docs} using {embeddings.name} embeddings")
-        return 0
+        knowledge = KnowledgeBase.build(
+            dsn=target_dsn,
+            docs_path=docs or environment.docs_path,
+            packages_path=packages or env("ADHAR_AI_PACKAGES_PATH", default=""),
+            table=cfg.rag_table,
+            embedder=await load_embeddings(environment.llm_gateway_url),
+        )
+        if not await knowledge.prepare():
+            print(f"knowledge store unavailable: {knowledge.store.status}", file=sys.stderr)
+            return 1
+        reports = await knowledge.refresh(only=sources)
+        written = unchanged = deleted = 0
+        for report in reports:
+            status = f"error: {report.error}" if report.error else "ok"
+            print(
+                f"{report.origin:10s} documents={report.documents:4d} "
+                f"written={report.chunks_written:5d} unchanged={report.chunks_unchanged:5d} "
+                f"deleted={report.chunks_deleted:4d}  {status}"
+            )
+            written += report.chunks_written
+            unchanged += report.chunks_unchanged
+            deleted += report.chunks_deleted
+        print(
+            f"\nknowledge base: {written} chunks written, {unchanged} unchanged, "
+            f"{deleted} removed"
+        )
+        return 1 if any(r.error for r in reports) else 0
 
     return asyncio.run(go())
 

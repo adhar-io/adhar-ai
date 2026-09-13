@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
@@ -64,12 +65,20 @@ def _access_of(tool: Any) -> str:
 
 
 class MCPToolbox:
-    """Opens one session per configured MCP server and keeps them for the
-    lifetime of the runtime process."""
+    """One MCP session per domain server, rebuilt when a server goes away.
+
+    Each domain gets its OWN `AsyncExitStack`. That is not tidiness: with one
+    shared stack no single session can be torn down and rebuilt, so when an MCP
+    Deployment rolled — an image update, a node drain, an OOM kill — the runtime
+    kept a dead session for that domain forever. Every call through it failed
+    while `/healthz` still listed the domain as connected, because health was a
+    snapshot taken at start-up rather than a fact about now. Nothing alerted, and
+    only restarting the runtime brought the tools back.
+    """
 
     def __init__(self, servers: dict[str, str]) -> None:
         self.servers = servers
-        self._stack = AsyncExitStack()
+        self._stacks: dict[str, AsyncExitStack] = {}
         self._sessions: dict[str, ClientSession] = {}
         self._tools: dict[str, RemoteTool] = {}
         self.errors: dict[str, str] = {}
@@ -81,23 +90,51 @@ class MCPToolbox:
     async def __aexit__(self, *exc: Any) -> None:
         await self.aclose()
 
-    async def connect(self) -> None:
-        for domain, base_url in self.servers.items():
-            url = base_url.rstrip("/")
-            if not url.endswith("/mcp"):
-                url = f"{url}/mcp"
+    @staticmethod
+    def _mcp_url(base_url: str) -> str:
+        url = base_url.rstrip("/")
+        return url if url.endswith("/mcp") else f"{url}/mcp"
+
+    async def connect(self, domains: Iterable[str] | None = None) -> None:
+        """Open a session per domain. Pass `domains` to (re)connect only some."""
+        for domain in domains if domains is not None else list(self.servers):
+            base_url = self.servers.get(domain)
+            if base_url is None:
+                continue
+            url = self._mcp_url(base_url)
+            stack = AsyncExitStack()
             try:
-                read, write = await self._stack.enter_async_context(streamable_http_client(url))
-                session = await self._stack.enter_async_context(ClientSession(read, write))
+                # NO timeout around these four lines, deliberately. They ENTER
+                # long-lived contexts whose cancel scopes must outlive this
+                # block; wrapping them in `fail_after` makes anyio tear the scope
+                # down at the end of the `with`, which breaks every connection —
+                # including the healthy ones. Bound the handshake at the
+                # transport instead if it ever needs bounding.
+                read, write = await stack.enter_async_context(streamable_http_client(url))
+                session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
                 listing = await session.list_tools()
-            except Exception as exc:
-                # A single unreachable domain must not take down the runtime;
-                # the rest of the toolbox stays usable and /healthz reports it.
-                self.errors[domain] = f"{type(exc).__name__}: {exc}"
-                log.warning("mcp server %s unreachable at %s: %s", domain, url, exc)
+            except BaseException as exc:  # noqa: BLE001
+                # BaseException, not Exception. `streamable_http_client` runs its
+                # own anyio task group, so a connection failure surfaces as a
+                # BaseExceptionGroup or a scope CancelledError — neither of which
+                # `except Exception` catches. Letting one escape took down the
+                # whole sweep and left a half-entered stack behind.
+                await self._discard(stack)
+                self.errors[domain] = _describe(exc)
+                self._sessions.pop(domain, None)
+                log.warning("mcp server %s unreachable at %s: %s", domain, url, self.errors[domain])
+                if isinstance(exc, KeyboardInterrupt | SystemExit):
+                    raise
                 continue
+
+            # Replace cleanly: drop any previous session's tools first, so a
+            # server that came back with a smaller tool list does not leave
+            # phantom entries pointing at tools it no longer serves.
+            self._forget(domain)
+            self._stacks[domain] = stack
             self._sessions[domain] = session
+            self.errors.pop(domain, None)
             for tool in listing.tools:
                 self._tools[tool.name] = RemoteTool(
                     name=tool.name,
@@ -107,8 +144,58 @@ class MCPToolbox:
                     access=_access_of(tool),
                 )
 
+    def _forget(self, domain: str) -> None:
+        """Drop a domain's session and tools, keeping its stack for the caller."""
+        self._sessions.pop(domain, None)
+        for name in [n for n, t in self._tools.items() if t.domain == domain]:
+            del self._tools[name]
+
+    @staticmethod
+    async def _discard(stack: AsyncExitStack) -> None:
+        """Close a stack, tolerating a close from a different task.
+
+        anyio ties a cancel scope to the task that opened it, so unwinding a
+        session from a request task raises rather than closing. The connection
+        is then released when the process exits. That is an acceptable cost for
+        a rare event (a server restart) and far better than keeping a session
+        that can no longer carry a call.
+        """
+        try:
+            await stack.aclose()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001
+            # Same reason as in `connect`: unwinding another task's cancel scope
+            # raises rather than closing. The socket is released at process exit,
+            # which is an acceptable cost for a rare server restart.
+            log.debug("could not unwind an MCP session cleanly: %s", _describe(exc))
+
+    async def reconnect(self, domain: str) -> bool:
+        """Rebuild one domain's session. Returns whether it is usable after.
+
+        Only ever called for a domain with NO live session — one that failed to
+        connect at start-up, or whose session a call has already been seen to
+        fail on. It deliberately does not probe healthy sessions: a liveness
+        ping issued from a different task than the one that opened the session
+        tears down its cancel scope, which killed every healthy domain at once
+        when it was tried.
+        """
+        stack = self._stacks.pop(domain, None)
+        self._forget(domain)
+        if stack is not None:
+            await self._discard(stack)
+        await self.connect([domain])
+        return domain in self._sessions
+
+    @property
+    def unhealthy(self) -> list[str]:
+        """Configured domains with no live session."""
+        return sorted(d for d in self.servers if d not in self._sessions)
+
     async def aclose(self) -> None:
-        await self._stack.aclose()
+        for stack in list(self._stacks.values()):
+            await self._discard(stack)
+        self._stacks.clear()
         self._sessions.clear()
         self._tools.clear()
 
@@ -136,9 +223,87 @@ class MCPToolbox:
         tool = self._tools.get(name)
         if tool is None:
             return {"error": f"unknown tool {name!r}", "available": sorted(self._tools)}
-        session = self._sessions[tool.domain]
-        result = await session.call_tool(name, arguments)
+        session = self._sessions.get(tool.domain)
+        if session is None:
+            return {
+                "error": (
+                    f"the {tool.domain} MCP server is not currently connected, so "
+                    f"{name!r} cannot be called; it will be retried automatically"
+                ),
+                "domain": tool.domain,
+            }
+        try:
+            result = await session.call_tool(name, arguments)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001
+            # BaseException, not Exception: when the server goes away mid-call
+            # the SDK's task group cancels the pending request, which surfaces
+            # as `CancelledError` — a BaseException that `except Exception`
+            # lets straight through, taking the whole agent run with it.
+            #
+            # A transport failure means the SESSION is gone, not that the tool
+            # failed. Mark the domain unhealthy so `/healthz` stops claiming it
+            # works and the reconnect loop rebuilds it, and tell the model
+            # plainly rather than handing it an opaque error to reason around.
+            reason = _describe(exc)
+            self.errors[tool.domain] = reason
+            self._sessions.pop(tool.domain, None)
+            log.warning("mcp session for %s failed mid-call: %s", tool.domain, reason)
+            return {
+                "error": (
+                    f"the {tool.domain} MCP server connection failed during "
+                    f"{name!r} ({reason}); it will be reconnected automatically"
+                ),
+                "domain": tool.domain,
+            }
         return _unwrap(result)
+
+
+def _describe(exc: BaseException) -> str:
+    """A one-line reason an operator can act on.
+
+    anyio reports a failed connection as a `CancelledError` from the scope that
+    was torn down, with the real cause — `ConnectError: All connection attempts
+    failed` — buried in a group or in `__cause__`. Reporting the outer wrapper
+    puts "Cancelled via cancel scope 0x..." in `/healthz`, which tells an
+    operator nothing about why a domain is missing.
+    """
+    candidates = [
+        c for c in _causes(exc) if type(c).__name__ not in _UNINFORMATIVE
+    ]
+    # Prefer something that names a network cause; anyio's internal stream
+    # signals (WouldBlock, EndOfStream) are true but say nothing useful.
+    for candidate in candidates:
+        text = str(candidate).strip()
+        if text:
+            return f"{type(candidate).__name__}: {text}"
+    return "connection failed (the server did not complete the MCP handshake)"
+
+
+#: Exception types that are true but tell an operator nothing. anyio raises
+#: these while unwinding a failed connection, and they otherwise end up in
+#: `/healthz` in place of "All connection attempts failed".
+_UNINFORMATIVE = frozenset(
+    {"CancelledError", "WouldBlock", "EndOfStream", "ClosedResourceError",
+     "BrokenResourceError", "GeneratorExit"}
+)
+
+
+def _causes(exc: BaseException, depth: int = 0) -> list[BaseException]:
+    """The exception and everything nested inside it, most specific first."""
+    if depth > 6:
+        return []
+    found: list[BaseException] = []
+    if isinstance(exc, BaseExceptionGroup):
+        for sub in exc.exceptions:
+            found.extend(_causes(sub, depth + 1))
+    else:
+        found.append(exc)
+    for nested in (exc.__cause__, exc.__context__):
+        if nested is not None and nested is not exc:
+            found.extend(_causes(nested, depth + 1))
+    return found
 
 
 def _is_error(result: Any) -> bool:

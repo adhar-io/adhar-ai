@@ -9,42 +9,57 @@ from __future__ import annotations
 
 import pytest
 
-from adhar_ai.rag import Chunk, LexicalIndex, Retriever, tokenize
+from adhar_ai.rag import Document, KnowledgeBase, KnowledgeStore, LexicalIndex, tokenize
 from adhar_ai.runtime.findings import Citation, Finding
 from adhar_ai.runtime.store import FindingStore
 
 DOCS = [
-    Chunk(
-        source="adr/0024-agentic-ai-platform.md#Decision",
+    Document(
+        doc_id="adr:0024",
+        source="adr/0024-agentic-ai-platform.md",
         kind="adr",
+        origin="docs",
         text=(
+            "## Decision\n\n"
             "Every mutation is a Git change against Gitea. There is no tool that calls "
             "kubectl apply, argocd app set, or a cloud API directly with mutating scope."
         ),
     ),
-    Chunk(
-        source="adr/0025-ai-gateway-agentgateway.md#Decision",
+    Document(
+        doc_id="adr:0025",
+        source="adr/0025-ai-gateway-agentgateway.md",
         kind="adr",
+        origin="docs",
         text=(
+            "## Decision\n\n"
             "A PreRouting policy lifts the model out of the request body into a header "
             "and ordinary HTTPRoute matches fan out to Anthropic, OpenAI or the "
             "in-cluster vLLM backend."
         ),
     ),
-    Chunk(
-        source="runbooks/degraded-app.md#Triage",
+    Document(
+        doc_id="runbook:degraded",
+        source="runbooks/degraded-app.md",
         kind="runbook",
+        origin="docs",
         text=(
+            "## Triage\n\n"
             "When an ArgoCD Application reports Degraded, check the pod events first, "
             "then the container logs, then whether the last sync succeeded."
         ),
     ),
 ]
+CHUNKS = [c for d in DOCS for c in d.chunks()]
 
 
 @pytest.fixture
 def lexical() -> LexicalIndex:
-    return LexicalIndex.from_chunks(DOCS)
+    return LexicalIndex.from_chunks(CHUNKS)
+
+
+def knowledge_base(lexical: LexicalIndex | None = None) -> KnowledgeBase:
+    """A knowledge base with no database: the unkeyed, no-CNPG posture."""
+    return KnowledgeBase(store=KnowledgeStore(dsn=""), embedder=None, lexical=lexical)
 
 
 # --------------------------------------------------------------------------- #
@@ -91,47 +106,54 @@ def test_a_missing_docs_path_yields_an_empty_index() -> None:
     assert LexicalIndex.from_path("/nonexistent/docs").size == 0
 
 
-async def test_the_retriever_falls_back_when_there_is_no_database(
+async def test_the_knowledge_base_grounds_with_no_key_and_no_database(
     lexical: LexicalIndex,
 ) -> None:
     """The README's promise, now true: no key and no database still grounds."""
-    retriever = Retriever(dsn="", embeddings=None, lexical=lexical)
-    hits = await retriever.search("argocd application degraded", k=2)
+    kb = knowledge_base(lexical)
+    hits = await kb.search("argocd application degraded", k=2)
     assert hits
-    assert all(h.retrieval == "lexical" for h in hits)
-    assert "lexical only" in retriever.mode
+    assert all("lexical" in h.retrieval for h in hits)
+    assert "in-process lexical only" in kb.mode
 
 
 async def test_grounding_blocks_carry_their_source_and_path(
     lexical: LexicalIndex,
 ) -> None:
-    blocks = await Retriever("", None, lexical=lexical).grounding("kubectl apply", k=1)
+    blocks = await knowledge_base(lexical).grounding("kubectl apply", k=1)
     assert blocks
     assert "0024-agentic-ai-platform.md" in blocks[0]
     assert "lexical" in blocks[0]
 
 
-async def test_a_broken_embedding_backend_degrades_rather_than_failing(
-    lexical: LexicalIndex,
-) -> None:
-    """An unkeyed gateway raises on embed. That must become lexical grounding,
-    not an exception and not a silent empty result."""
-
-    class Unkeyed:
-        name = "unkeyed"
-
-        async def embed(self, texts):
-            raise RuntimeError("503: no API key configured")
-
-    retriever = Retriever(dsn="postgresql://nope/db", embeddings=Unkeyed(), lexical=lexical)
-    hits = await retriever.search("kubectl apply", k=1)
-    assert hits and hits[0].retrieval == "lexical"
+async def test_grounding_ids_are_empty_without_a_store(lexical: LexicalIndex) -> None:
+    """Feedback needs real row ids. An in-process hit has none, and says so by
+    returning nothing rather than a fake id that /feedback would silently drop."""
+    blocks, ids = await knowledge_base(lexical).grounding_with_ids("kubectl apply", k=2)
+    assert blocks
+    assert ids == []
 
 
 async def test_with_nothing_configured_the_mode_says_so() -> None:
-    retriever = Retriever(dsn="", embeddings=None, lexical=None)
-    assert await retriever.search("anything", k=3) == []
-    assert "unavailable" in retriever.mode
+    kb = knowledge_base(None)
+    assert await kb.search("anything", k=3) == []
+    assert "unavailable" in kb.mode
+
+
+async def test_a_note_is_retrievable_immediately(lexical: LexicalIndex) -> None:
+    """Someone writing up an outage at 02:00 must be able to ask about it at
+    02:01, not after the next scheduled refresh."""
+    kb = knowledge_base(lexical)
+    result = await kb.add_note(
+        title="Gitea token rotation broke the agent's write path",
+        body="The adhar-ai-bot token expired; PRs failed with 401 until it was reissued.",
+        kind="incident",
+        author="ops",
+    )
+    assert result["retrievable"] is True
+    assert result["durable"] is False  # no database in this posture
+    hits = await kb.search("adhar-ai-bot token expired", k=3)
+    assert any("token rotation" in h.source.lower() for h in hits)
 
 
 # --------------------------------------------------------------------------- #

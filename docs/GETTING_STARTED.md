@@ -571,6 +571,7 @@ pull. See [Project status](../README.md#-project-status).
 |---|---|
 | 🧰 **[TOOLS.md](TOOLS.md)** | you want a tool's exact arguments and failure modes |
 | 🏛️ **[ARCHITECTURE.md](ARCHITECTURE.md)** | you want to know why it is shaped this way |
+| 🧠 **[KNOWLEDGE.md](KNOWLEDGE.md)** | you want the agent to know your platform, and keep learning |
 | ⚙️ **[OPERATIONS.md](OPERATIONS.md)** | you are configuring or debugging a deployment |
 | 🔐 **[SECURITY.md](SECURITY.md)** | you are deciding whether to enable this for real |
 | 🤝 **[CONTRIBUTING.md](../CONTRIBUTING.md)** | you are adding a tool or an operator |

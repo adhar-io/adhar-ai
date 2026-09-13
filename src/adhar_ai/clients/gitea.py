@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from ..config import GiteaConfig
+from ..config import GiteaConfig, gitea_api_base
 from .errors import BackendNotConfigured
 
 
@@ -46,7 +46,9 @@ class GiteaClient:
     def api(self) -> str:
         if not self.cfg.api_url:
             raise BackendNotConfigured("Gitea", "set GITEA_API_URL")
-        return f"{self.cfg.api_url}/api/v1"
+        # Accepts a bare origin or one that already carries /api/v1; see
+        # `gitea_api_base` for why both shapes reach this code in practice.
+        return gitea_api_base(self.cfg.api_url)
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
