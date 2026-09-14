@@ -219,8 +219,60 @@ class MCPToolbox:
             out.append(tool.to_spec())
         return out
 
+    async def refresh(self) -> list[str]:
+        """Re-list tools on every reachable domain. Returns domains refreshed.
+
+        Discovery used to happen exactly once, in :meth:`connect`. The
+        consequence on the platform: when an MCP Deployment rolled (a config
+        change, an image bump), the runtime kept its start-up tool list and
+        answered *"please enable the observability promql tool"* for a tool that
+        was being served the whole time — until the runtime itself was
+        restarted. Tool inventories are cheap to re-read and servers change
+        underneath a long-lived runtime, so re-discovery has to be a normal
+        operation, not a restart.
+
+        Only domains WITHOUT a live session are rebuilt (see :meth:`reconnect`
+        for why a healthy session must not be probed from another task); live
+        ones are re-listed over their existing session.
+        """
+        refreshed: list[str] = []
+        for domain in list(self.servers):
+            session = self._sessions.get(domain)
+            if session is None:
+                if await self.reconnect(domain):
+                    refreshed.append(domain)
+                continue
+            try:
+                listing = await session.list_tools()
+            except BaseException as exc:  # noqa: BLE001
+                if isinstance(exc, KeyboardInterrupt | SystemExit):
+                    raise
+                # The session is dead; rebuild it like a failed start-up.
+                self.errors[domain] = _describe(exc)
+                if await self.reconnect(domain):
+                    refreshed.append(domain)
+                continue
+            for n in [n for n, t in self._tools.items() if t.domain == domain]:
+                del self._tools[n]
+            for tool in listing.tools:
+                self._tools[tool.name] = RemoteTool(
+                    name=tool.name,
+                    domain=domain,
+                    description=(tool.description or "").strip(),
+                    schema=dict(getattr(tool, "input_schema", None) or {}),
+                    access=_access_of(tool),
+                )
+            refreshed.append(domain)
+        return refreshed
+
     async def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self._tools.get(name)
+        if tool is None:
+            # Unknown to THIS process's inventory is not the same as unknown to
+            # the platform: a server may have rolled since start-up. Refresh
+            # once before declaring the tool absent.
+            await self.refresh()
+            tool = self._tools.get(name)
         if tool is None:
             return {"error": f"unknown tool {name!r}", "available": sorted(self._tools)}
         session = self._sessions.get(tool.domain)

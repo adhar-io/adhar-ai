@@ -27,14 +27,23 @@ from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi import Path as PathParam
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from ..config import RuntimeEnv, env, env_int
+from ..observability import METRICS_CONTENT_TYPE, metrics, setup_tracing
 from ..provenance import ORIGIN_LABEL_KEY, ORIGIN_LABEL_VALUE
 from .auth import AuthPolicy, Principal
 from .autonomy import RuntimeConfig, lower_of
 from .findings import Finding
+from .intake import (
+    Drain,
+    IdempotencyCache,
+    RateLimited,
+    RateLimiter,
+    ShuttingDown,
+    event_key,
+)
 from .loop import GatewayClient, Session, run
 from .operators import REGISTRY, OperatorContext
 from .store import FindingStore
@@ -56,6 +65,16 @@ KNOWLEDGE_REFRESH_SECONDS = env_int("ADHAR_AI_KNOWLEDGE_REFRESH_SECONDS", defaul
 #: the catalogue simply is not one of the knowledge sources.
 PACKAGES_PATH = env("ADHAR_AI_PACKAGES_PATH", default="")
 FINDINGS_KEPT = 200
+#: Agent runs one caller may START per window. Not a token budget — that is
+#: agentgateway's, per Keycloak group — but a cap on concurrent expensive work,
+#: which token budgets do not constrain until the tokens are already spent.
+RATE_LIMIT = env_int("ADHAR_AI_RATE_LIMIT", default=20)
+RATE_WINDOW = env_int("ADHAR_AI_RATE_WINDOW_SECONDS", default=60)
+#: How long a repeated operator event returns the first run's finding instead of
+#: running again. Alertmanager and ArgoCD notifications both retry.
+IDEMPOTENCY_TTL = env_int("ADHAR_AI_IDEMPOTENCY_TTL_SECONDS", default=600)
+#: How long SIGTERM waits for in-flight runs before giving up on them.
+SHUTDOWN_GRACE = env_int("ADHAR_AI_SHUTDOWN_GRACE_SECONDS", default=30)
 
 
 class NoteRequest(BaseModel):
@@ -158,6 +177,10 @@ def create_app(
         try:
             yield
         finally:
+            # Refuse new work and let what is in flight finish. A run has
+            # already spent its tokens and may have opened a branch; dropping it
+            # on SIGTERM wastes the spend and can leave a half-made proposal.
+            await app.state.drain.close()
             for task in [*app.state.pollers, app.state.rag_task]:
                 if task is not None:
                     task.cancel()
@@ -169,10 +192,14 @@ def create_app(
                 await app.state.gateway.aclose()
 
     app = FastAPI(title="Adhar AI Runtime", version="0.1.0", lifespan=lifespan)
+    app.state.tracing = setup_tracing("runtime")
     app.state.config = config
     app.state.env = environment
     app.state.findings = findings
     app.state.auth = policy
+    app.state.limiter = RateLimiter(limit=RATE_LIMIT, window=RATE_WINDOW)
+    app.state.idempotency = IdempotencyCache(ttl=IDEMPOTENCY_TTL)
+    app.state.drain = Drain(grace=SHUTDOWN_GRACE)
 
     if not policy.oidc_enabled and not policy.webhook_token and not policy.require_auth:
         log.warning(
@@ -191,6 +218,15 @@ def create_app(
             # one, an operator cannot reach a Strict-mode LLM gateway at all.
             bearer=await policy.bearer_for(principal or Principal()),
         )
+
+    @app.get("/metrics")
+    async def prometheus_metrics() -> Response:
+        """Prometheus exposition. Ungated like `/healthz`: a scrape presents no
+        credential, and these are aggregate counters rather than cluster detail
+        — no tenant label, no prompt, no finding."""
+        toolbox_: MCPToolbox = app.state.toolbox
+        metrics.mcp_servers_connected(len(toolbox_.servers) - len(toolbox_.unhealthy))
+        return Response(content=metrics.render_metrics(), media_type=METRICS_CONTENT_TYPE)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
@@ -222,6 +258,18 @@ def create_app(
                 "auth": policy.describe(),
                 "findings_held": len(findings),
                 "findings_store": app.state.store.status,
+                "tracing": "on" if app.state.tracing else "off",
+                # Dependencies the breaker has given up on, and credential
+                # kinds masked on the way out. Both empty is the healthy case.
+                "circuits": app.state.gateway.breakers.snapshot()
+                if hasattr(app.state.gateway, "breakers")
+                else {},
+                "credentials_masked": getattr(app.state.gateway, "masked", {}),
+                "intake": {
+                    **app.state.drain.snapshot(),
+                    "rate_limit": app.state.limiter.snapshot(),
+                    "idempotency": app.state.idempotency.snapshot(),
+                },
                 ORIGIN_LABEL_KEY: ORIGIN_LABEL_VALUE,
             }
         )
@@ -254,6 +302,7 @@ def create_app(
     @app.post("/chat")
     async def chat(request: Request, body: ChatRequest = Body(...)) -> dict[str, Any]:
         principal: Principal = policy.principal(request)
+        _admit(app, principal.subject)
         grounding: list[str] = []
         chunk_ids: list[int] = []
         if app.state.knowledge is not None:
@@ -279,7 +328,10 @@ def create_app(
             # against the caller's Keycloak group rather than the runtime's.
             bearer=await policy.bearer_for(principal),
         )
-        result = await run(app.state.gateway, app.state.toolbox, session, body.prompt, config)
+        with app.state.drain:
+            result = await run(
+                app.state.gateway, app.state.toolbox, session, body.prompt, config
+            )
         payload = result.as_dict()
         payload["grounded_on"] = [g.split("\n", 1)[0].lstrip("# ") for g in grounding]
         payload["principal"] = principal.as_dict()
@@ -306,10 +358,26 @@ def create_app(
                 status_code=404,
                 detail={"error": f"unknown operator {name!r}", "available": sorted(REGISTRY)},
             )
-        finding = await operator_cls(await ctx(principal)).handle(event, principal=principal)
+
+        # Alertmanager and ArgoCD notifications both retry, on any non-2xx and
+        # on their own restart, and a retried alert is indistinguishable from a
+        # new one. Without this, one flapping alert becomes N agent runs and — at
+        # `suggest` or above — N near-identical pull requests for one problem.
+        key = event_key(name, event)
+        if (cached := app.state.idempotency.get(key)) is not None:
+            log.info("replaying the finding for a repeated %s event", name)
+            return {**cached, "replayed": True}
+
+        _admit(app, principal.subject)
+        with app.state.drain:
+            finding = await operator_cls(await ctx(principal)).handle(
+                event, principal=principal
+            )
         findings.appendleft(finding)
         await _persist(app, finding)
-        return finding.model_dump()
+        payload = finding.model_dump()
+        app.state.idempotency.put(key, payload)
+        return payload
 
     # ------------------------------------------------------------ knowledge --
 
@@ -416,6 +484,34 @@ def create_app(
         return {"count": len(rows), "findings": [f.model_dump() for f in rows[:limit]]}
 
     return app
+
+
+def _admit(app: FastAPI, principal: str) -> None:
+    """Decide whether to start one expensive unit of work.
+
+    Two refusals, two status codes an HTTP client already knows how to handle:
+    `429` with `Retry-After` for a rate limit, `503` with `Retry-After` while
+    draining. Alertmanager and ArgoCD both honour a retry on each.
+    """
+    if app.state.drain.closing:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": str(ShuttingDown())},
+            headers={"Retry-After": "5"},
+        )
+    try:
+        app.state.limiter.check(principal)
+    except RateLimited as exc:
+        metrics.record_denial("rate-limit", "chat")
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": str(exc),
+                "limit": exc.limit,
+                "window_seconds": exc.window,
+            },
+            headers={"Retry-After": str(max(1, int(exc.retry_after)))},
+        ) from exc
 
 
 # ---------------------------------------------------------------- background --

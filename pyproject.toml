@@ -21,6 +21,10 @@ dependencies = [
     # transitively via `kubernetes`; it is a direct import now, so it is a
     # direct dependency.
     "pyjwt[crypto]>=2.9",
+    # Prometheus exposition. Every other Adhar package ships a ServiceMonitor and
+    # a dashboard; without this the agentic layer is the one part of the platform
+    # with no operational signal at all.
+    "prometheus-client>=0.21",
 ]
 
 [project.optional-dependencies]
@@ -60,6 +64,9 @@ markers = [
     # Spawns real MCP server processes, so it costs seconds rather than
     # milliseconds. Run the fast suite with: pytest -m "not slow"
     "slow: drives real subprocesses over real HTTP",
+    # Graded against a real model. Opt-in: needs ADHAR_AI_EVAL_GATEWAY, and it
+    # costs tokens, so it is the nightly job rather than part of every push.
+    "eval: scores the agent against a live LLM",
 ]
 
 [tool.mypy]

@@ -20,9 +20,10 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from ..config import LLMConfig
+from ..observability import METRICS_CONTENT_TYPE, metrics, setup_tracing
 from ..provenance import ORIGIN_LABEL_KEY, ORIGIN_LABEL_VALUE
 from .budget import BudgetExceeded, BudgetLedger
 from .cache import ResponseCache, cache_key
@@ -53,6 +54,7 @@ def create_app(cfg: LLMConfig | None = None) -> FastAPI:
     #: budgets above already do the rationing.
     sessions = asyncio.Semaphore(max(1, config.budgets.max_concurrent_sessions))
     cache = ResponseCache(enabled=config.response_cache)
+    setup_tracing("gateway")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -102,6 +104,10 @@ def create_app(cfg: LLMConfig | None = None) -> FastAPI:
     async def models() -> ModelList:
         names = await provider().models()
         return ModelList(data=[ModelCard(id=n, owned_by=config.provider) for n in names])
+
+    @app.get("/metrics")
+    async def prometheus_metrics() -> Response:
+        return Response(content=metrics.render_metrics(), media_type=METRICS_CONTENT_TYPE)
 
     @app.get("/v1/cache")
     async def cache_stats() -> dict[str, Any]:

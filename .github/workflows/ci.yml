@@ -29,6 +29,21 @@ jobs:
           uv run adhar-ai tools > /tmp/tools.json
           diff -u contract/tools.json /tmp/tools.json
 
+      - name: Red team and evals
+        # Two gates the design doc (§12) asks for and the repo did not have.
+        #
+        # The red-team suite drives the loop with a model that has been fully
+        # compromised — it does exactly what the injected text asks — and
+        # asserts it still cannot exceed its authority. A guarantee that holds
+        # only while the model behaves is not a guarantee.
+        #
+        # The evals run every scenario against a scripted model, which grades
+        # the SYSTEM: was the tool offered, did grounding reach the prompt, was
+        # the stage respected. Grading a real model needs a key and costs
+        # tokens, so that half is the nightly job (`-m eval`) rather than this
+        # one.
+        run: uv run pytest tests/test_red_team.py tests/evals -q
+
       - name: End-to-end (seven MCP servers + the runtime, over real HTTP)
         # The unit suite drives tools in-process and fakes the toolbox, so it
         # cannot see the defects that only exist once real processes talk to

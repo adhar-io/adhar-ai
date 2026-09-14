@@ -263,6 +263,12 @@ DEFAULT_MODELS = {
     "azure": "",  # Azure addresses a *deployment*, so there is no safe default.
     "openai-compatible": "",
     "ollama": "llama3.1",
+    # Self-hosted inference on the platform. agentgateway routes any model name
+    # with the `local/` prefix to the in-cluster serving stack — vLLM behind the
+    # llm-d router — so the runtime can be pointed at a private model with a
+    # single env var (ADHAR_AI_LLM_PROVIDER=local) and no key at all. The name
+    # after the prefix must match what the model server was started with.
+    "local": "local/Qwen/Qwen2.5-0.5B-Instruct",
 }
 
 #: `claude` is the alias the platform manifests use for the Anthropic provider.
@@ -275,6 +281,10 @@ PROVIDER_ALIASES = {
     "openai-compatible": "openai-compatible",
     "compatible": "openai-compatible",
     "ollama": "ollama",
+    # Self-hosted inference through the platform gateway (ai/llm-d).
+    "local": "local",
+    "llm-d": "local",
+    "vllm": "local",
 }
 
 

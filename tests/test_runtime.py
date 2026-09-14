@@ -139,6 +139,11 @@ class FakeToolbox:
         ]
 
     async def call(self, name, arguments):
+        # An unknown name is an ERROR, exactly as in MCPToolbox.call. A fake
+        # that happily executes a tool the real toolbox has never heard of
+        # would make a red-team test pass for the wrong reason.
+        if name not in self._tools:
+            return {"error": f"unknown tool {name!r}", "available": sorted(self._tools)}
         self.invoked.append((name, arguments))
         return self.results.get(name, {"ok": True, "tool": name})
 
@@ -217,6 +222,28 @@ async def test_loop_calls_a_tool_then_answers():
     last = gateway.requests[1]["messages"][-1]
     assert last.role == "tool"
     assert "OutOfSync" in last.content
+
+
+async def test_an_empty_model_turn_is_an_error_not_an_empty_answer():
+    """A reasoning model that exhausts max_tokens mid-reasoning returns neither
+    content nor a tool call. Treated as an answer, the caller gets an empty
+    string and `kind: "answer"` — a claim of success for a run that produced
+    nothing. Found by the eval suite against a real model."""
+    empty = {"choices": [{"message": {"role": "assistant", "content": None},
+                          "finish_reason": "length"}]}
+    result = await run(FakeGateway([empty]), FakeToolbox(), Session(), "why is it down?")
+
+    assert result.kind == "error"
+    assert "neither an answer nor a tool call" in result.error
+    assert "finish_reason=length" in result.error
+    assert "raise limits.maxTokens" in result.error
+    assert result.text == ""
+
+
+async def test_a_whitespace_only_answer_is_also_an_error():
+    blank = {"choices": [{"message": {"role": "assistant", "content": "   \n  "}}]}
+    result = await run(FakeGateway([blank]), FakeToolbox(), Session(), "why?")
+    assert result.kind == "error"
 
 
 async def test_write_tool_result_is_reported_as_a_proposal():

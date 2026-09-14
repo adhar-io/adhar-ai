@@ -14,9 +14,10 @@ from typing import Any
 
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from ..config import DOMAINS, WRITE_DOMAINS, MCPConfig
+from ..observability import METRICS_CONTENT_TYPE, metrics
 
 try:  # mcp SDK >= 2.0 renamed FastMCP to MCPServer; the decorator API is the same.
     from mcp.server.mcpserver import MCPServer as FastMCP
@@ -52,6 +53,15 @@ def build_server(cfg: MCPConfig) -> Any:
                 "write_enabled": cfg.gitea.write_enabled,
                 "write_path": "gitea-pull-request-only",
             }
+        )
+
+    @mcp.custom_route("/metrics", methods=["GET"])
+    async def prometheus_metrics(_request: Request) -> Response:
+        """Each domain server exports its own tool-call counters, so a slow or
+        failing backend is attributable to the domain that fronts it rather
+        than averaged away across all seven."""
+        return Response(
+            content=metrics.render_metrics(), media_type=METRICS_CONTENT_TYPE
         )
 
     @mcp.custom_route("/readyz", methods=["GET"])

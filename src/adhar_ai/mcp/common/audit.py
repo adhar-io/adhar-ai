@@ -76,13 +76,69 @@ EXPECTED_FAILURES: tuple[type[Exception], ...] = (
 )
 
 
+def _anticipated(exc: BaseException) -> bool:
+    """Is this a failure the model should be told about in full?
+
+    The two families below carry the most useful text the agent ever sees from a
+    backend, and both were being masked as crashes:
+
+    * `ApiException` — "namespaces is forbidden: User cannot list resource" is an
+      RBAC answer, and "the server could not find the requested resource" means
+      a CRD is not installed. Masked, both become "Error executing tool", and the
+      agent reports a broken tool instead of a missing permission.
+    * `HTTPStatusError` — a 404 from ArgoCD means the application does not exist,
+      which is the answer to the question, not a fault.
+    """
+    if isinstance(exc, EXPECTED_FAILURES):
+        return True
+    return isinstance(exc, _backend_failures())
+
+
+@functools.cache
+def _backend_failures() -> tuple[type[BaseException], ...]:
+    """Backend error BASE classes, resolved once.
+
+    By type rather than by class name: the Kubernetes client raises
+    `NotFoundException`, `ForbiddenException` and friends, all subclasses of
+    `ApiException`. A name check catches the base and misses every subclass —
+    which is to say, it misses every error that is actually raised.
+    """
+    found: list[type[BaseException]] = []
+    try:
+        from kubernetes.client.exceptions import ApiException
+
+        found.append(ApiException)
+    except Exception:  # noqa: BLE001 - optional at import time
+        pass
+    try:
+        import httpx
+
+        found.append(httpx.HTTPError)
+    except Exception:  # noqa: BLE001
+        pass
+    return tuple(found)
+
+
 def _expected(exc: Exception) -> Exception:
     """Re-raise an anticipated failure as a `ToolError` so its text survives."""
     if isinstance(exc, ToolError):
         return exc
-    if isinstance(exc, EXPECTED_FAILURES):
-        return ToolError(f"{type(exc).__name__}: {exc}")
+    if _anticipated(exc):
+        return ToolError(f"{type(exc).__name__}: {str(exc)[:600]}")
     return exc
+
+
+def _record(tool: str, access: str, domain: str, decision: str, started: float) -> None:
+    """Count this call in the SERVER's own metrics.
+
+    Not only in the runtime's loop: an external agent — Claude Code, an IDE,
+    ChatOps — reaches these tools through agentgateway and never touches the
+    runtime, so runtime-side instrumentation alone would leave the entire
+    outward MCP surface invisible.
+    """
+    from ...observability import record_tool_call
+
+    record_tool_call(tool, domain, access, decision, time.monotonic() - started)
 
 
 def audited(access: str, domain: str) -> Callable[[F], F]:
@@ -110,7 +166,9 @@ def audited(access: str, domain: str) -> Callable[[F], F]:
                     error=f"{type(exc).__name__}: {exc}",
                     duration_ms=round((time.monotonic() - started) * 1000, 1),
                 )
+                _record(fn.__name__, access, domain, "error", started)
                 raise _expected(exc) from exc
+            _record(fn.__name__, access, domain, "ok", started)
             emit(
                 audit_id=audit_id,
                 tool=fn.__name__,

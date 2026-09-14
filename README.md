@@ -190,6 +190,37 @@ presents no credential. Everything else is gated, so
 
 ---
 
+## 🏭 Built to be left running
+
+An agent that works on a good day is a demo. These are the controls that make it
+safe to leave running on a bad one.
+
+| Concern | What is there |
+|---|---|
+| 📊 **Observability** | `/metrics` on every component, two ServiceMonitors, a 12-panel Grafana dashboard, optional OTel tracing with GenAI semantic conventions |
+| 💰 **Cost** | tokens and realized spend per model, and a refusal to *estimate* cost when the gateway does not report it |
+| 🔁 **Resilience** | retry with full jitter on what is worth retrying, per-dependency circuit breakers, timeouts on everything outbound |
+| 🚦 **Admission** | per-caller rate limiting, idempotent operator webhooks, graceful draining on SIGTERM |
+| 🔒 **Safety** | outbound credential masking, an optional model allow-list, policy refusals counted as a first-class signal |
+| 🎯 **Quality gates** | a behavioural red-team suite and a scenario eval suite, both in CI |
+
+Two of these deserve a sentence each.
+
+**Duplicate delivery is real.** Alertmanager retries, and so does ArgoCD
+notifications. Without deduplication one flapping alert becomes N agent runs and,
+above `read-only`, N near-identical pull requests for one problem. Operator
+events are keyed on the event body with volatile timestamps stripped, so a retry
+replays the first finding instead of doing the work again.
+
+**`adhar_ai_denied_total` is the security signal.** A steady trickle of policy
+refusals is the system working. A spike is either a misconfiguration or something
+trying to make the agent exceed its authority — and it is the only metric that
+tells those apart from "the agent is quiet today".
+
+👉 Full detail: **[docs/PRODUCTION.md](docs/PRODUCTION.md)**
+
+---
+
 ## 📚 Grounding — a knowledge base, not a docs folder
 
 An agent that only knows Kubernetes in general is a search engine with extra
@@ -238,6 +269,8 @@ on, and every grounding block names its source *and* which path found it.
 ---
 
 ## 🔀 Providers
+
+`local` — no key. The model runs on the platform (`ai/llm-d`: vLLM replicas behind the llm-d router with an agentgateway sidecar) and agentgateway routes every `local/*` model name there; `ADHAR_AI_LLM_PROVIDER=local` selects it and `DEFAULT_MODELS["local"]` names the served model.
 
 Everything here speaks `/v1/chat/completions` and `/v1/models` to whatever
 gateway `LLM_GATEWAY_URL` points at, and **always names a model in the body**.
@@ -288,6 +321,7 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 | 🏛️ **[Architecture](docs/ARCHITECTURE.md)** | How the three components, the seven servers and the data plane fit together |
 | 🧰 **[Tool Reference](docs/TOOLS.md)** | Every one of the 27 tools: arguments, backend, failure mode |
 | 🧠 **[Knowledge Base](docs/KNOWLEDGE.md)** | What the agent knows, how it stays current, and how it learns |
+| 🏭 **[Production](docs/PRODUCTION.md)** | Metrics, resilience, admission control, safety and the quality gates |
 | ⚙️ **[Operations](docs/OPERATIONS.md)** | Every setting, the health surface, and how to diagnose it when it is wrong |
 | 🔐 **[Security](docs/SECURITY.md)** | Threat model, the write path, authentication, autonomy, prompt injection |
 | 🤝 **[Contributing](CONTRIBUTING.md)** | Adding a tool or an operator without breaking the guarantees |
@@ -298,7 +332,7 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 
 ```bash
 uv sync --extra rag
-uv run pytest -q                       # 266 tests (13 more with a database)
+uv run pytest -q                       # 366 tests (13 more with a database)
 uv run ruff check src tests
 uv run mypy src
 uv run adhar-ai tools | diff -u contract/tools.json -   # the Go-CLI contract
@@ -396,15 +430,19 @@ Phase 3 agentic entry.
 
 | Capability | Status |
 |---|---|
-| MCP-native tools, 7 domains, PR-only writes | ✅ 266 tests, 279 with a database |
+| MCP-native tools, 7 domains, PR-only writes | ✅ 366 tests, 379 with a database |
 | Federated MCP over streamable HTTP at `/mcp` | ✅ verified against the Host headers a Pod actually receives |
 | GitOps-safe runtime, four-rung autonomy ladder | ✅ each rung behaviourally distinct and tested |
 | Authentication on the runtime's own surface | ✅ Keycloak JWT, webhook token, outbound service-account token |
 | Knowledge base — 6 sources, hybrid retrieval, learning loop | ✅ verified against a real pgvector: 1,299 chunks, 0 re-embeds on an unchanged pass |
 | Durable findings | ✅ Postgres-backed, degrades to memory |
+| Production controls — metrics, tracing, resilience, admission, safety | ✅ `/metrics` on every component, dashboard drift-tested against the registry |
+| Quality gates — behavioural red team, scenario evals | ✅ both in CI; the live eval graded a real model and found a real bug |
 | **Live run against a real LLM and a real cluster** | ✅ **see below** |
 | **Container images on GHCR** | ⏳ **the remaining gate** |
 | GPU run of the `ai/vllm` profile | ⏳ needs a GPU node pool |
+| Self-hosted inference on CPU via `ai/llm-d` (router + agentgateway sidecar → vLLM), provider `local` | ⏳ built 2026-09-15, awaiting the DigitalOcean end-to-end run |
+| Tool re-discovery without a runtime restart (`MCPToolbox.refresh()`) | ✅ unit-tested (a rolled MCP server used to need a restart) |
 
 ### What a live run proved
 

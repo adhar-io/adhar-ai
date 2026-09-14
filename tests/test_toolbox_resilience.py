@@ -32,6 +32,19 @@ def _start() -> subprocess.Popen:
     )
 
 
+def _reached_the_server(result: dict) -> bool:
+    """Did the CALL get through, whatever the tool then made of it?
+
+    These tests are about session liveness, not backend availability. Asserting
+    that the tool succeeded would make them depend on whichever cluster the
+    ambient kubeconfig happens to point at — a Crossplane CRD that is not
+    installed yet is a perfectly good reason for `list_xrs` to fail, and says
+    nothing about the MCP session.
+    """
+    error = str(result.get("error", ""))
+    return "MCP server connection failed" not in error and "not currently connected" not in error
+
+
 def _wait_up(tries: int = 60) -> bool:
     for _ in range(tries):
         try:
@@ -51,7 +64,7 @@ async def test_a_restarted_server_is_detected_and_reconnected() -> None:
     try:
         await toolbox.connect()
         assert toolbox.unhealthy == []
-        assert "error" not in await toolbox.call("list_xrs", {"kind": "CompositeCluster"})
+        assert _reached_the_server(await toolbox.call("list_xrs", {"kind": "X"}))
 
         server.terminate()
         server.wait()
@@ -70,7 +83,7 @@ async def test_a_restarted_server_is_detected_and_reconnected() -> None:
         assert _wait_up(), "the MCP server under test never restarted"
         assert await toolbox.reconnect("provision") is True
         assert toolbox.unhealthy == []
-        assert "error" not in await toolbox.call("list_xrs", {"kind": "CompositeCluster"})
+        assert _reached_the_server(await toolbox.call("list_xrs", {"kind": "X"}))
     finally:
         await toolbox.aclose()
         server.terminate()
@@ -86,7 +99,7 @@ async def test_one_dead_domain_does_not_cost_the_others() -> None:
         await toolbox.connect()
         assert toolbox.unhealthy == ["dead"]
         assert len(toolbox.tools) == 3, "the healthy domain keeps all of its tools"
-        assert "error" not in await toolbox.call("list_xrs", {"kind": "CompositeCluster"})
+        assert _reached_the_server(await toolbox.call("list_xrs", {"kind": "X"}))
         # And the reason is one a human can act on.
         assert "cancel scope" not in toolbox.errors["dead"].lower()
     finally:
