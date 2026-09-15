@@ -16,6 +16,10 @@ import logging
 from typing import Protocol
 
 import httpx
+from collections.abc import Awaitable, Callable
+
+#: Yields the bearer for the gateway — the runtime's service-account token.
+TokenProvider = Callable[[], Awaitable[str]]
 
 from ..config import openai_v1_base
 
@@ -52,8 +56,17 @@ class GatewayEmbeddings:
     name = "gateway"
     dim = EMBEDDING_DIM
 
-    def __init__(self, base_url: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        client: httpx.AsyncClient | None = None,
+        token_provider: TokenProvider | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
+        #: Mints the bearer the gateway requires. Optional so a gateway with
+        #: no JWT policy (the bundled local one) keeps working unchanged; when
+        #: the provider yields an empty token no header is sent at all.
+        self._token_provider = token_provider
         self.api_base = openai_v1_base(base_url)
         self._client = client
         #: Filled in from the gateway's own response. The knowledge store records
@@ -68,7 +81,14 @@ class GatewayEmbeddings:
         return self._client
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        resp = await self._http().post(f"{self.api_base}/embeddings", json={"input": texts})
+        headers: dict[str, str] = {}
+        if self._token_provider is not None:
+            token = await self._token_provider()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+        resp = await self._http().post(
+            f"{self.api_base}/embeddings", json={"input": texts}, headers=headers
+        )
         resp.raise_for_status()
         payload = resp.json()
         if reported := str(payload.get("model") or ""):
@@ -103,7 +123,9 @@ class LocalEmbeddings:
         return [_fit([float(v) for v in row]) for row in vectors]
 
 
-async def load_embeddings(gateway_url: str) -> EmbeddingBackend | None:
+async def load_embeddings(
+    gateway_url: str, token_provider: TokenProvider | None = None
+) -> EmbeddingBackend | None:
     """The best available embedder, or `None` if there is none.
 
     Returns `None` rather than raising, because "no embedder" is a degradation
@@ -117,7 +139,7 @@ async def load_embeddings(gateway_url: str) -> EmbeddingBackend | None:
     nothing.
     """
     if gateway_url:
-        backend = GatewayEmbeddings(gateway_url)
+        backend = GatewayEmbeddings(gateway_url, token_provider=token_provider)
         try:
             await backend.embed(["adhar ai readiness probe"])
             return backend

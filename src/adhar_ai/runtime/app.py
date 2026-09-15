@@ -126,6 +126,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Module-level pollers mint the runtime's own token through this;
+        # they cannot reach the `policy` closure any other way.
+        app.state.policy = policy
         app.state.toolbox = toolbox or MCPToolbox(config.mcp_servers)
         if toolbox is None:
             await app.state.toolbox.connect()
@@ -555,7 +558,13 @@ async def _bootstrap_knowledge(
         return
 
     try:
-        knowledge.embedder = await load_embeddings(environment.llm_gateway_url)
+        knowledge.embedder = await load_embeddings(
+            environment.llm_gateway_url,
+            # The gateway enforces JWT auth on /v1/embeddings like every other
+            # route; an unauthenticated probe 401s and the knowledge base
+            # silently drops to lexical retrieval on every install.
+            token_provider=app.state.policy.service_token,
+        )
         await knowledge.prepare()
         reports = await knowledge.refresh()
         app.state.rag_status = knowledge.mode
@@ -642,6 +651,13 @@ async def _drift_poller(app: FastAPI, config: RuntimeConfig) -> None:
                         app.state.toolbox,
                         app.state.gateway,
                         retriever=app.state.knowledge,
+                        # A poller has no user token to forward, so the run
+                        # presents the runtime's own service-account token —
+                        # exactly what `ctx()` does for a webhook. Without it
+                        # every scheduled run met the Strict-JWT gateway with no
+                        # bearer and 401'd, and the finding it recorded was the
+                        # 401 rather than the drift.
+                        bearer=await app.state.policy.bearer_for(Principal()),
                     )
                 )
                 finding = await operator.handle(
@@ -671,6 +687,7 @@ async def _cost_poller(app: FastAPI, config: RuntimeConfig) -> None:
                         app.state.toolbox,
                         app.state.gateway,
                         retriever=app.state.knowledge,
+                        bearer=await app.state.policy.bearer_for(Principal()),
                     )
                 )
                 finding = await operator.handle({"window": "7d", "snapshot": snapshot})
