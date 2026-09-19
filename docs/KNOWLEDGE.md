@@ -17,6 +17,7 @@ the second one possible.
 1. [What it holds](#1-what-it-holds)
 2. [How it stays current](#2-how-it-stays-current)
 3. [How retrieval works](#3-how-retrieval-works)
+3b. [The knowledge graph](#3b-the-knowledge-graph)
 4. [How it learns](#4-how-it-learns)
 5. [Degradation: what works without what](#5-degradation-what-works-without-what)
 6. [The HTTP surface](#6-the-http-surface)
@@ -130,6 +131,90 @@ A hit reports which half found it, so you can see the fusion working:
 [vector+lexical] doc      ARCHITECTURE.md#10. The AI Layer
 [vector        ] package  package ai/vllm#Package `ai/vllm`
 ```
+
+---
+
+## 3b. The knowledge graph
+
+Retrieval finds text *about* a thing. It does not answer **"what breaks if this
+goes away?"** — that is a question about relationships, and no amount of
+similarity search reconstructs a dependency chain from prose.
+
+So the same Postgres that holds the vectors holds a graph: entities and the
+edges between them, built by recursive CTEs rather than by a second datastore.
+One database, one backup, one credential — and the traversal a blast-radius
+answer needs is bounded, not a graph workload.
+
+### What is in it
+
+| Origin | Nodes | Edges |
+|---|---|---|
+| `packages` | every package in the platform stack | `depends_on` between them |
+| `argocd` | ArgoCD Applications and the packages they ship | `deploys` |
+| `workloads` | pods in the platform namespace, plus the components and teams that own them | `runs_in`, `owns` |
+| `tools` | the seven MCP domains and their 27 tools | `serves` |
+
+Each source is refreshed independently and **replaces only its own origin**. A
+package refresh that wiped the workload nodes would empty the graph between
+scrapes, which is exactly the bug this shape prevents.
+
+### How a question reaches it
+
+```
+"what breaks if the cnpg package goes down?"
+        │
+        ├─ candidate_terms()   ->  ["cnpg", "package"] minus stopwords
+        │      "cluster", "platform", "service", "pod" and friends are DROPPED:
+        │      a question containing "the cluster" must not anchor on whatever
+        │      node happens to be called `cluster`
+        │
+        ├─ graph.resolve()     ->  EXACT name or id only
+        │      Fuzzy resolution sounds helpful and is not. A blast radius
+        │      computed from the wrong node is confidently wrong, which is the
+        │      one failure mode this module exists to avoid.
+        │
+        ├─ graph.neighbourhood(depth=1)  or  graph.dependents(depth=3)
+        │
+        └─ as_grounding()      ->  prose grouped by relation, placed FIRST
+```
+
+The subgraph goes **before** the retrieved documents in the prompt. When a
+question names an entity, what that entity is connected to is more relevant than
+any paragraph that happens to mention it.
+
+Blast radius walks edges **backwards along dependency relations only** —
+`depends_on`, `owns`, `requires`, `routes_to`, `binds`. Following every relation
+returns the whole connected component, which for a platform is very nearly
+everything and therefore answers nothing. A runbook that *mentions* a database
+does not break when the database does.
+
+Cycles terminate: platform graphs have them, and a traversal that does not
+expect one hangs.
+
+### Seeing it
+
+```bash
+curl -sS localhost:8080/knowledge | jq .graph
+```
+
+```json
+{ "status": "ready", "nodes": 127, "edges": 157,
+  "byKind": [ {"origin": "packages", "kind": "Package", "count": 93},
+              {"origin": "tools",    "kind": "Tool",    "count": 27},
+              {"origin": "tools",    "kind": "Domain",  "count":  7} ],
+  "byRelation": [ {"relation": "depends_on", "count": 130},
+                  {"relation": "serves",     "count":  27} ] }
+```
+
+Those are real figures from `hack/verify-knowledge.py` against a live
+`../adhar` checkout. The `argocd` and `workloads` origins contribute nothing
+there because they read from a cluster, and that run had none — which is the
+right behaviour: a source with nothing to say adds no nodes rather than
+inventing them.
+
+Without a database the graph is absent, `status` says so, and every query
+returns empty rather than raising — the platform still answers, just without
+relationships.
 
 ---
 

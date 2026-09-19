@@ -13,15 +13,15 @@ the base image stays small.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 import httpx
-from collections.abc import Awaitable, Callable
+
+from ..config import openai_v1_base
 
 #: Yields the bearer for the gateway — the runtime's service-account token.
 TokenProvider = Callable[[], Awaitable[str]]
-
-from ..config import openai_v1_base
 
 log = logging.getLogger("adhar_ai.rag")
 

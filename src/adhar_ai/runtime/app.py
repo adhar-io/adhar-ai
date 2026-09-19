@@ -23,6 +23,7 @@ import logging
 import os
 from collections import deque
 from contextlib import asynccontextmanager, suppress
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -33,8 +34,11 @@ from pydantic import BaseModel
 from ..config import RuntimeEnv, env, env_int
 from ..observability import METRICS_CONTENT_TYPE, metrics, setup_tracing
 from ..provenance import ORIGIN_LABEL_KEY, ORIGIN_LABEL_VALUE
+from .agents import AgentRegistry
 from .auth import AuthPolicy, Principal
 from .autonomy import RuntimeConfig, lower_of
+from .chores import ChoreRegistry, ChoreRun
+from .discovery import ONBOARDING_QUESTIONS, CoverageLog, capability_catalogue
 from .findings import Finding
 from .intake import (
     Drain,
@@ -44,9 +48,14 @@ from .intake import (
     ShuttingDown,
     event_key,
 )
+from .journeys import parse as parse_journey
+from .journeys import render as render_journey
 from .loop import GatewayClient, Session, run
 from .operators import REGISTRY, OperatorContext
+from .orchestrator import Orchestrator, plan_first
+from .sessions import ConversationStore
 from .store import FindingStore
+from .tasks import PlanStep, Task, TaskQueue, TaskStore
 from .toolbox import MCPToolbox
 
 log = logging.getLogger("adhar_ai.runtime")
@@ -75,6 +84,12 @@ RATE_WINDOW = env_int("ADHAR_AI_RATE_WINDOW_SECONDS", default=60)
 IDEMPOTENCY_TTL = env_int("ADHAR_AI_IDEMPOTENCY_TTL_SECONDS", default=600)
 #: How long SIGTERM waits for in-flight runs before giving up on them.
 SHUTDOWN_GRACE = env_int("ADHAR_AI_SHUTDOWN_GRACE_SECONDS", default=30)
+#: Concurrent agent runs. An unbounded pool turns a burst of queued work into a
+#: burst of concurrent LLM spend.
+TASK_WORKERS = env_int("ADHAR_AI_TASK_WORKERS", default=3)
+#: How often due chores are checked. The interval each chore declares is what
+#: actually paces it; this is only the resolution of the check.
+CHORE_TICK_SECONDS = env_int("ADHAR_AI_CHORE_TICK_SECONDS", default=300)
 
 
 class NoteRequest(BaseModel):
@@ -100,6 +115,25 @@ class FeedbackRequest(BaseModel):
 
     chunk_ids: list[int]
     helpful: bool = True
+    #: The question, so an unhelpful answer becomes a coverage gap rather than
+    #: only a down-vote on some chunks.
+    question: str = ""
+
+
+class TaskRequest(BaseModel):
+    """Work to be done behind the caller, rather than during their request."""
+
+    prompt: str
+    agent: str = ""
+    autonomy: str | None = None
+    session: str | None = None
+    #: Write a plan and wait for approval before acting, whatever the stage.
+    plan_first: bool = False
+
+
+class ApprovalRequest(BaseModel):
+    approve: bool = True
+    note: str = ""
 
 
 class ChatRequest(BaseModel):
@@ -151,6 +185,28 @@ def create_app(
         # rollout does not look to an on-call engineer like "nothing happened".
         app.state.store = store or FindingStore(environment.rag_dsn, table=config.findings_table)
         await app.state.store.prepare()
+
+        # Tasks: the primitive everything else rests on. Durable where a
+        # database exists, in-memory where one does not — and either way the
+        # work outlives the request that asked for it.
+        app.state.tasks = TaskStore(environment.rag_dsn)
+        await app.state.tasks.prepare()
+        app.state.orchestrator = Orchestrator(
+            config=config,
+            registry=app.state.agents,
+            toolbox=app.state.toolbox,
+            gateway=app.state.gateway,
+            knowledge=None,  # attached once the knowledge base is up
+            store=app.state.tasks,
+            coverage=app.state.coverage,
+            auth=policy,
+            conversations=app.state.conversations,
+        )
+        app.state.queue = TaskQueue(
+            app.state.tasks, app.state.orchestrator.execute, workers=TASK_WORKERS
+        )
+        await app.state.queue.start()
+        await app.state.queue.resume()
         for previous in reversed(await app.state.store.recent(FINDINGS_KEPT)):
             findings.appendleft(previous)
 
@@ -173,6 +229,7 @@ def create_app(
 
         app.state.pollers = [
             asyncio.create_task(_reconnect_loop(app)),
+            asyncio.create_task(_chore_loop(app)),
             asyncio.create_task(_knowledge_refresh_loop(app)),
             asyncio.create_task(_drift_poller(app, config)),
             asyncio.create_task(_cost_poller(app, config)),
@@ -184,6 +241,7 @@ def create_app(
             # already spent its tokens and may have opened a branch; dropping it
             # on SIGTERM wastes the spend and can leave a half-made proposal.
             await app.state.drain.close()
+            await app.state.queue.close(grace=SHUTDOWN_GRACE)
             for task in [*app.state.pollers, app.state.rag_task]:
                 if task is not None:
                     task.cancel()
@@ -201,6 +259,10 @@ def create_app(
     app.state.findings = findings
     app.state.auth = policy
     app.state.limiter = RateLimiter(limit=RATE_LIMIT, window=RATE_WINDOW)
+    app.state.agents = AgentRegistry.from_mapping(config.agents)
+    app.state.chores = ChoreRegistry.from_mapping(config.chores)
+    app.state.conversations = ConversationStore()
+    app.state.coverage = CoverageLog()
     app.state.idempotency = IdempotencyCache(ttl=IDEMPOTENCY_TTL)
     app.state.drain = Drain(grace=SHUTDOWN_GRACE)
 
@@ -268,6 +330,14 @@ def create_app(
                 if hasattr(app.state.gateway, "breakers")
                 else {},
                 "credentials_masked": getattr(app.state.gateway, "masked", {}),
+                "tasks": {
+                    **app.state.tasks.snapshot(),
+                    **app.state.queue.snapshot(),
+                },
+                "agents": app.state.agents.names,
+                "chores": app.state.chores.snapshot(),
+                "conversations": app.state.conversations.snapshot(),
+                "coverage": app.state.coverage.snapshot(),
                 "intake": {
                     **app.state.drain.snapshot(),
                     "rate_limit": app.state.limiter.snapshot(),
@@ -306,6 +376,11 @@ def create_app(
     async def chat(request: Request, body: ChatRequest = Body(...)) -> dict[str, Any]:
         principal: Principal = policy.principal(request)
         _admit(app, principal.subject)
+        conversation = (
+            app.state.conversations.open(body.session, principal.subject)
+            if body.session
+            else None
+        )
         grounding: list[str] = []
         chunk_ids: list[int] = []
         if app.state.knowledge is not None:
@@ -330,6 +405,10 @@ def create_app(
             # The caller's own token, so agentgateway meters this run's spend
             # against the caller's Keycloak group rather than the runtime's.
             bearer=await policy.bearer_for(principal),
+            # Prior turns, so "and what should I do about it?" does not
+            # re-investigate from scratch.
+            history=conversation.history() if conversation else [],
+            history_note=conversation.context_note() if conversation else "",
         )
         with app.state.drain:
             result = await run(
@@ -342,6 +421,16 @@ def create_app(
         # Returned so a caller can say whether this grounding helped; POST them
         # back to /feedback and the store learns which chunks are worth ranking.
         payload["grounding_chunk_ids"] = chunk_ids
+        if conversation is not None:
+            conversation.record(
+                body.prompt,
+                result.text,
+                [c["tool"] for c in result.tool_calls],
+            )
+            payload["session"] = conversation.as_dict()
+        app.state.coverage.observe_run(
+            body.prompt, result, agent="chat", grounded=bool(grounding)
+        )
         return payload
 
     @app.post("/operators/{name}/event")
@@ -381,6 +470,237 @@ def create_app(
         payload = finding.model_dump()
         app.state.idempotency.put(key, payload)
         return payload
+
+    # ---------------------------------------------------------------- tasks --
+
+    @app.post("/tasks")
+    async def create_task(
+        request: Request, body: TaskRequest = Body(...)
+    ) -> dict[str, Any]:
+        """Queue work and return immediately.
+
+        The difference from `/chat` is not the reasoning — it is the same agent
+        loop — but the lifetime. A task outlives this request, so it can take
+        twenty minutes, pause for an approval, be handed between agents, and
+        survive the rollout that interrupts it.
+        """
+        principal: Principal = policy.principal(request)
+        _admit(app, principal.subject)
+
+        task = Task(
+            prompt=body.prompt,
+            agent=body.agent,
+            requester=principal.subject,
+            autonomy=principal.ceiling(
+                lower_of(body.autonomy or config.default_autonomy, config.default_autonomy)
+            ),
+            trigger="chat",
+            session=body.session or "",
+        )
+        waiting = False
+        if body.plan_first or task.autonomy in ("approve-to-apply", "scoped"):
+            waiting = await plan_first(app.state.orchestrator, task)
+        if waiting:
+            # It wrote a plan and is holding for a human. Enqueueing it here
+            # would have a worker pick it up and run the plan nobody approved,
+            # which makes the whole gate decorative. `/tasks/{id}/approve`
+            # submits it.
+            await app.state.tasks.save(task)
+        else:
+            await app.state.queue.submit(task)
+
+        if body.session:
+            conversation = app.state.conversations.open(body.session, principal.subject)
+            conversation.task_ids.append(task.id)
+        return task.as_dict()
+
+    @app.get("/tasks")
+    async def list_tasks(request: Request, limit: int = 50) -> dict[str, Any]:
+        policy.principal(request)
+        tasks = await app.state.tasks.recent(limit)
+        return {"count": len(tasks), "tasks": [t.as_dict() for t in tasks]}
+
+    @app.get("/tasks/{task_id}")
+    async def read_task(request: Request, task_id: str = PathParam(...)) -> dict[str, Any]:
+        policy.principal(request)
+        task = await app.state.tasks.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail={"error": f"no task {task_id!r}"})
+        return task.as_dict()
+
+    @app.post("/tasks/{task_id}/approve")
+    async def approve_task(
+        request: Request,
+        task_id: str = PathParam(...),
+        body: ApprovalRequest = Body(default_factory=ApprovalRequest),
+    ) -> dict[str, Any]:
+        """Approve or reject a plan a task is waiting on.
+
+        Approval requires a write-capable credential. A task that reached
+        `awaiting_approval` is one whose stage can change the platform, so
+        letting an unauthenticated caller release it would make the whole
+        approval gate decorative.
+        """
+        principal: Principal = policy.principal(request)
+        task = await app.state.tasks.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail={"error": f"no task {task_id!r}"})
+        if task.state != "awaiting_approval":
+            raise HTTPException(
+                status_code=409,
+                detail={"error": f"task {task_id} is {task.state}, not awaiting approval"},
+            )
+        if not principal.write_allowed:
+            metrics.record_denial("approval-unauthorised", "tasks")
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "approving a plan requires a write-capable credential",
+                    "groups": list(policy.write_groups),
+                },
+            )
+
+        if not body.approve:
+            note = body.note.strip() or "no reason given"
+            # On the plan, not only in `waiting_on`: a cancelled task clears
+            # what it was waiting on, so a rejection recorded only there is a
+            # rejection nobody can read afterwards.
+            task.plan.append(
+                PlanStep(description=f"rejected by {principal.subject}: {note}", done=True)
+            )
+            task.transition("cancelled", reason=f"rejected by {principal.subject}")
+            await app.state.tasks.save(task)
+            return task.as_dict()
+
+        task.plan.append(
+            PlanStep(description=f"approved by {principal.subject}", done=True)
+        )
+        await app.state.queue.submit(task)
+        return task.as_dict()
+
+    # --------------------------------------------------------------- agents --
+
+    @app.get("/agents")
+    async def list_agents(request: Request) -> dict[str, Any]:
+        policy.principal(request)
+        return {"agents": app.state.agents.describe()}
+
+    @app.post("/agents/route")
+    async def route_preview(
+        request: Request, body: ChatRequest = Body(...)
+    ) -> dict[str, Any]:
+        """Which agent would take this, without spending a completion to find out."""
+        policy.principal(request)
+        agent, confidence = app.state.agents.route(body.prompt)
+        spec = app.state.agents.get(agent)
+        return {
+            "agent": agent,
+            "confidence": confidence,
+            "ceiling": spec.ceiling,
+            "tools": list(spec.tools) or "all permitted by ceiling",
+        }
+
+    # ------------------------------------------------------------- journeys --
+
+    @app.post("/journeys/{surface}")
+    async def journey_event(
+        request: Request,
+        surface: str = PathParam(...),
+        payload: dict[str, Any] = Body(default_factory=dict),
+    ) -> dict[str, Any]:
+        """Slack, a pull request, or a failed pipeline.
+
+        Every one of these payloads is attacker-influenced — anybody who can
+        open a pull request can write anything in its body. They arrive as data
+        in a prompt that says so, and the structural guarantee holds regardless:
+        a review cannot change anything, whatever it is told.
+        """
+        principal: Principal = policy.principal(request, allow_webhook_token=True)
+        try:
+            journey = parse_journey(surface, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
+        if not journey.prompt.strip():
+            return {"skipped": "the payload carried no question"}
+
+        _admit(app, principal.subject)
+        task = Task(
+            prompt=journey.prompt,
+            requester=principal.subject,
+            autonomy=principal.ceiling(config.default_autonomy),
+            trigger=surface,
+            # A Slack thread and a pull request are both long-lived contexts
+            # where a follow-up refers to what came before. Dropping this makes
+            # every message in a thread start from nothing.
+            session=journey.session,
+        )
+        with app.state.drain:
+            task = await app.state.orchestrator.execute(task)
+
+        conversation = app.state.conversations.get(journey.session, principal.subject)
+        checked = (
+            [{"tool": tool} for turn in conversation.turns for tool in turn.tools]
+            if conversation
+            else []
+        )
+        result = SimpleNamespace(
+            text=task.result,
+            kind="error" if task.error else "answer",
+            error=task.error,
+            pull_requests=task.artifacts,
+            # What the run actually called. The renderer prints these under
+            # "what I checked", so a plan step here would claim a tool that
+            # does not exist.
+            tool_calls=checked,
+        )
+        return {
+            "task": task.id,
+            "agent": task.agent,
+            "reply": render_journey(result, journey),
+        }
+
+    # --------------------------------------------------------------- chores --
+
+    @app.get("/chores")
+    async def list_chores(request: Request) -> dict[str, Any]:
+        policy.principal(request)
+        return {"chores": app.state.chores.describe()}
+
+    @app.post("/chores/{name}/run")
+    async def run_chore(request: Request, name: str = PathParam(...)) -> dict[str, Any]:
+        """Run one chore now, regardless of its schedule."""
+        principal: Principal = policy.principal(request, allow_webhook_token=True)
+        chore = app.state.chores.get(name)
+        if chore is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": f"no chore {name!r}", "available": [
+                    c["name"] for c in app.state.chores.describe()
+                ]},
+            )
+        _admit(app, principal.subject)
+        run = await _run_chore(app, chore, principal)
+        return run.as_dict()
+
+    # ------------------------------------------------------------ discovery --
+
+    @app.get("/capabilities")
+    async def capabilities(request: Request) -> dict[str, Any]:
+        """What the platform can do right now, derived rather than declared."""
+        policy.principal(request)
+        catalogue = await capability_catalogue(
+            app.state.toolbox, app.state.agents, app.state.knowledge, app.state.chores
+        )
+        catalogue["tryAsking"] = [
+            {"question": q, "demonstrates": why} for q, why in ONBOARDING_QUESTIONS
+        ]
+        return catalogue
+
+    @app.get("/coverage")
+    async def coverage(request: Request, limit: int = 50) -> dict[str, Any]:
+        """Questions the platform answered badly — the queue of runbooks to write."""
+        policy.principal(request)
+        return app.state.coverage.report(limit)
 
     # ------------------------------------------------------------ knowledge --
 
@@ -472,6 +792,10 @@ def create_app(
         """
         policy.principal(request)
         updated = await app.state.knowledge.record_feedback(body.chunk_ids, body.helpful)
+        if not body.helpful and body.question:
+            # A human saying an answer did not help is the strongest coverage
+            # signal there is — stronger than any heuristic over the run.
+            app.state.coverage.record_unhelpful(body.question)
         return {"updated": updated, "helpful": body.helpful}
 
     @app.get("/findings")
@@ -548,6 +872,8 @@ async def _bootstrap_knowledge(
     from ..rag import KnowledgeBase, LexicalIndex, load_embeddings
 
     knowledge: KnowledgeBase = app.state.knowledge
+    if getattr(app.state, "orchestrator", None) is not None:
+        app.state.orchestrator.knowledge = knowledge
 
     lexical = await asyncio.to_thread(LexicalIndex.from_path, environment.docs_path)
     knowledge.lexical = lexical
@@ -600,6 +926,65 @@ async def _knowledge_refresh_loop(app: FastAPI) -> None:
             raise
         except Exception as exc:  # noqa: BLE001
             log.warning("knowledge refresh failed: %s", exc)
+
+
+async def _run_chore(app: FastAPI, chore: Any, principal: Principal) -> ChoreRun:
+    """Run one chore as a task, under its own agent and caps.
+
+    A chore in dry-run is pinned to `read-only` regardless of the ConfigMap, so
+    "report what you would do" cannot quietly become "do it" because somebody
+    raised the global stage for an unrelated reason.
+    """
+    run = ChoreRun(chore=chore.name)
+    stage = "read-only" if chore.dry_run else principal.ceiling(config_of(app).default_autonomy)
+
+    task = Task(
+        prompt=chore.prompt,
+        agent=chore.agent,
+        requester=f"chore:{chore.name}",
+        autonomy=stage,
+        trigger=f"chore:{chore.name}",
+    )
+    run.task_id = task.id
+    try:
+        with app.state.drain:
+            task = await app.state.orchestrator.execute(task)
+    except Exception as exc:  # noqa: BLE001
+        run.error = f"{type(exc).__name__}: {exc}"
+        app.state.chores.record(run)
+        return run
+
+    proposals = [a for a in task.artifacts if a.get("url")]
+    if len(proposals) > chore.max_proposals:
+        # The cap is what stands between a helpful morning and an unreviewable
+        # flood. It is reported rather than silently trimmed, because a chore
+        # that wanted to open twelve pull requests is a chore to look at.
+        run.skipped = (
+            f"produced {len(proposals)} proposals, above its cap of {chore.max_proposals}"
+        )
+        log.warning("chore %s exceeded its proposal cap", chore.name)
+    run.proposals = len(proposals)
+    app.state.chores.record(run)
+    return run
+
+
+def config_of(app: FastAPI) -> Any:
+    return app.state.config
+
+
+async def _chore_loop(app: FastAPI) -> None:
+    """Run due chores. Enabled ones only, one at a time."""
+    while True:
+        await asyncio.sleep(CHORE_TICK_SECONDS)
+        try:
+            due = app.state.chores.due()
+            for chore in due:
+                log.info("running chore %s (dry_run=%s)", chore.name, chore.dry_run)
+                await _run_chore(app, chore, Principal())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chore sweep failed: %s", exc)
 
 
 async def _reconnect_loop(app: FastAPI) -> None:

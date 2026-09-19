@@ -77,7 +77,7 @@ One image, three entrypoints:
 | Component | What it is | Entrypoint |
 |---|---|---|
 | 🔌 **MCP tool servers** | one server per domain, streamable HTTP at `/mcp` on `:8080` | `adhar-ai mcp --domain <domain>` |
-| 🧠 **Agent runtime** | event-driven operators plus a tool-use chat loop | `adhar-ai runtime` |
+| 🧠 **Agent runtime** | seven specialist agents, durable tasks, event-driven operators and a tool-use chat loop | `adhar-ai runtime` |
 | 🚪 **LLM gateway** | provider-agnostic, OpenAI-compatible — **local development only** | `adhar-ai gateway` |
 
 In the platform, LLM traffic and the federated MCP endpoint are served by
@@ -149,6 +149,65 @@ that finding becomes a PR is the stage's decision, not the model's.
 
 ---
 
+## 🧑‍🚀 Specialist agents, durable work and quiet automation
+
+A single assistant with twenty-seven tools answers every question the same
+average way. Seven specialists do not, and none of them can do more than the one
+assistant could:
+
+| Agent | Answers | Ceiling |
+|---|---|---|
+| 🚨 `incident` | alerts, crashloops, outages, "why is this broken?" | `suggest` |
+| 💰 `cost` | spend, budgets, showback, right-sizing | `suggest` |
+| 🔐 `security` | policy, findings, CVEs, compliance evidence | `approve-to-apply` |
+| 🏗️ `platform` | scaffolding, packages, golden paths, Crossplane | `suggest` |
+| 🚢 `release` | promotion, drift, sync failures, rollback | `approve-to-apply` |
+| 📖 `guide` | how-to, onboarding, conventions | `read-only` |
+| 🧭 `generalist` | everything else — routing always terminates here | `suggest` |
+
+Each agent's **ceiling narrows and never widens**: a `read-only` agent stays
+read-only for a platform administrator at `scoped`, because the narrowing
+belongs to the role rather than to the request. Routing is lexical, not a model
+call — spending a completion to decide who should spend a completion doubles
+latency on every request. An agent may hand work on, but only to a colleague it
+declared, only with a stated reason, and only four times before the chain is
+refused as a loop.
+
+**Work outlives the request.** `POST /chat` answers inside the request, which is
+right for a question and wrong for an investigation that takes twenty minutes or
+a plan that waits on a human. `POST /tasks` returns an id immediately; the work
+runs behind a bounded worker pool, survives a restart where a database is
+configured, and reports its own state:
+
+```
+queued ──► planning ──► awaiting_approval ──► running ──► done | failed | cancelled
+```
+
+Above `suggest`, the agent writes a plan **without acting** and the task stops.
+Releasing it needs the same `platform-admin` credential the PR-opening tools do,
+because a task that can change the platform is exactly as privileged as a write.
+
+**Seven chores ship, all off and all in dry-run.** Certificate expiry, drift,
+orphaned resources, failing scorecards, cost outliers, stale findings, runbook
+rot. Enabling one and letting it act are two separate decisions, and
+`maxProposals` bounds what a single run can open — the difference between a
+helpful Monday morning and an unreviewable flood.
+
+**The agent turns up where the work is:** a Slack thread, a pull-request review
+that declares itself, a failed pipeline. A thread is a conversation, so a
+follow-up continues rather than starting fresh. Every inbound payload is treated
+as attacker-influenced, and the structural guarantee holds whatever it says.
+
+**It knows what it cannot answer.** `GET /capabilities` is derived from the live
+tool surface rather than hand-written, so it never promises something that no
+longer exists. `GET /coverage` is the queue of questions the platform answered
+badly, clustered by how often each has been asked — which is the list somebody
+writes the missing runbook from.
+
+👉 Full reference: **[docs/AGENTS.md](docs/AGENTS.md)**
+
+---
+
 ## 🔐 Who may drive it
 
 The runtime is the one Adhar AI surface that does **not** sit behind
@@ -181,6 +240,14 @@ clients are wired up.
 | `POST /knowledge/search` | retrieve grounding without running the agent |
 | `POST /knowledge/refresh` | re-derive knowledge now |
 | `POST /feedback` | say whether an answer's grounding helped |
+| `POST /tasks` | start work that outlives the request |
+| `GET /tasks` · `GET /tasks/{id}` | what is running, and what one task did |
+| `POST /tasks/{id}/approve` | release or reject a plan — needs a writer |
+| `GET /agents` · `POST /agents/route` | the roster, and who would take this |
+| `POST /journeys/{surface}` | Slack, a pull request, a failed pipeline |
+| `GET /chores` · `POST /chores/{name}/run` | the catalogue, and one run now |
+| `GET /capabilities` | what the platform can do right now, derived not declared |
+| `GET /coverage` | what it could not answer — the queue of runbooks to write |
 
 `/healthz` is the only one left open — it is the readiness probe, and it
 presents no credential. Everything else is gated, so
@@ -321,6 +388,7 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 | 🏛️ **[Architecture](docs/ARCHITECTURE.md)** | How the three components, the seven servers and the data plane fit together |
 | 🧰 **[Tool Reference](docs/TOOLS.md)** | Every one of the 27 tools: arguments, backend, failure mode |
 | 🧠 **[Knowledge Base](docs/KNOWLEDGE.md)** | What the agent knows, how it stays current, and how it learns |
+| 🤖 **[Agents & Automation](docs/AGENTS.md)** | The specialist roster, durable tasks, approvals, chores and journeys |
 | 🏭 **[Production](docs/PRODUCTION.md)** | Metrics, resilience, admission control, safety and the quality gates |
 | ⚙️ **[Operations](docs/OPERATIONS.md)** | Every setting, the health surface, and how to diagnose it when it is wrong |
 | 🔐 **[Security](docs/SECURITY.md)** | Threat model, the write path, authentication, autonomy, prompt injection |
@@ -332,7 +400,7 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 
 ```bash
 uv sync --extra rag
-uv run pytest -q                       # 366 tests (13 more with a database)
+uv run pytest -q                       # 498 tests (517 with a database)
 uv run ruff check src tests
 uv run mypy src
 uv run adhar-ai tools | diff -u contract/tools.json -   # the Go-CLI contract
@@ -356,9 +424,13 @@ running.
 Stands up all seven MCP servers and the runtime over **real HTTP** and asserts
 the seam between them: the transport's Host-header handling, the MCP client's
 result unwrapping, and whether an unconfigured backend's error text survives the
-trip to the model. It needs no cluster, no key and no database — what it asserts
-is either true offline or honestly reported as unavailable, which is the property
-being tested. It runs in CI.
+trip to the model. A second runtime then runs against a scripted
+OpenAI-compatible server ([`hack/stub-llm.py`](hack/stub-llm.py)), which drives
+the agentic layer end to end — a task that outlives its request, a handoff
+recorded on the task, a Slack thread that remembers its first message, a
+dry-run chore that proposes nothing. It needs no cluster, no key and no
+database: what it asserts is either true offline or honestly reported as
+unavailable, which is the property being tested. It runs in CI.
 
 ```bash
 docker run -d --name adhar-rag -p 15432:5432 \
@@ -430,7 +502,7 @@ Phase 3 agentic entry.
 
 | Capability | Status |
 |---|---|
-| MCP-native tools, 7 domains, PR-only writes | ✅ 366 tests, 379 with a database |
+| MCP-native tools, 7 domains, PR-only writes | ✅ 498 tests, 517 with a database |
 | Federated MCP over streamable HTTP at `/mcp` | ✅ verified against the Host headers a Pod actually receives |
 | GitOps-safe runtime, four-rung autonomy ladder | ✅ each rung behaviourally distinct and tested |
 | Authentication on the runtime's own surface | ✅ Keycloak JWT, webhook token, outbound service-account token |
@@ -438,6 +510,10 @@ Phase 3 agentic entry.
 | Durable findings | ✅ Postgres-backed, degrades to memory |
 | Production controls — metrics, tracing, resilience, admission, safety | ✅ `/metrics` on every component, dashboard drift-tested against the registry |
 | Quality gates — behavioural red team, scenario evals | ✅ both in CI; the live eval graded a real model and found a real bug |
+| Specialist agents, routing, handoff with a depth cap | ✅ ceiling narrowing and refusal paths tested; handoff verified over real HTTP |
+| Durable tasks, plan-and-approve, bounded workers | ✅ state machine refuses illegal moves; approval needs a write credential |
+| Knowledge graph over the same Postgres | ✅ verified against a real database: traversal, blast radius, cycles, per-origin refresh |
+| Chores, journeys, capability catalogue, coverage gaps | ✅ every chore ships off and in dry-run, asserted as policy |
 | **Live run against a real LLM and a real cluster** | ✅ **see below** |
 | **Container images on GHCR** | ⏳ **the remaining gate** |
 | GPU run of the `ai/vllm` profile | ⏳ needs a GPU node pool |

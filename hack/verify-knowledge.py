@@ -36,6 +36,8 @@ from collections import Counter
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"))
 
+from adhar_ai.rag.extract import candidate_terms  # noqa: E402
+from adhar_ai.rag.graph import as_grounding  # noqa: E402
 from adhar_ai.rag import KnowledgeBase  # noqa: E402
 from adhar_ai.rag.lexical import tokenize  # noqa: E402
 
@@ -120,19 +122,29 @@ async def main() -> int:
     for report in first:
         print(f"        {DIM_}{report.as_dict()}{RESET}")
     check("no origin errored", all(not r.error for r in first))
-    check(
-        "documentation was indexed",
-        by_origin.get("docs", None) is not None and by_origin["docs"].chunks_written > 100,
-    )
+
+    def indexed(origin: str) -> int:
+        """Chunks this origin now HOLDS, written or already present.
+
+        Not `chunks_written`: on a database this script has already populated,
+        an unchanged corpus correctly writes nothing, and asserting on writes
+        alone makes the check pass only against a cold database — which is the
+        one state a verification script is least likely to be run in.
+        """
+        report = by_origin.get(origin)
+        return 0 if report is None else report.chunks_written + report.chunks_unchanged
+
+    check("documentation was indexed", indexed("docs") > 100, f"{indexed('docs')} chunk(s)")
     check(
         "the agent's own tool inventory was indexed",
-        by_origin.get("tools") is not None and by_origin["tools"].chunks_written > 0,
+        indexed("tools") > 0,
+        f"{indexed('tools')} chunk(s)",
     )
     if args.packages:
         check(
             "the package catalogue was indexed",
-            by_origin.get("packages") is not None
-            and by_origin["packages"].chunks_written > 50,
+            indexed("packages") > 50,
+            f"{indexed('packages')} chunk(s)",
         )
 
     step("3. Incremental refresh does not re-embed unchanged content")
@@ -238,6 +250,66 @@ async def main() -> int:
         )
     check("the base holds the whole platform", stats["chunks"] > 1000)
     check("more than one kind of knowledge is present", len({o["kind"] for o in stats["origins"]}) >= 3)
+
+    step("10. The knowledge graph over the same database")
+    graph = kb.graph
+    if graph is None or not graph.ready:
+        check("the graph is available", False, "no graph — this needs a database")
+    else:
+        gstats = await graph.stats()
+        print(f"        {DIM_}nodes={gstats['nodes']} edges={gstats['edges']}{RESET}")
+        for row in gstats["byKind"]:
+            print(
+                f"        {DIM_}{row['origin']:10s} {row['kind']:12s} count={row['count']:4d}{RESET}"
+            )
+        for row in gstats["byRelation"]:
+            print(f"        {DIM_}{'':10s} -{row['relation']:11s} count={row['count']:4d}{RESET}")
+        check("the graph holds the platform's entities", gstats["nodes"] > 50)
+        check("and the relationships between them", gstats["edges"] > 50)
+
+        # Resolution is exact by design: a blast radius computed from the wrong
+        # node is confidently wrong, which is the failure this avoids.
+        anchors = await graph.resolve(candidate_terms("what breaks if keycloak goes down?"))
+        check(
+            "a question resolves to the entity it names",
+            any(a.name == "keycloak" for a in anchors),
+            ", ".join(a.id for a in anchors[:4]) or "nothing resolved",
+        )
+        check(
+            "a misspelling resolves to nothing rather than to the wrong node",
+            not await graph.resolve(["keycloack"]),
+        )
+
+        if anchors:
+            anchor = next(a for a in anchors if a.name == "keycloak")
+            dependents = await graph.dependents(anchor.id, depth=3)
+            check(
+                "blast radius names what depends on it",
+                len(dependents) > 1,
+                f"{len(dependents)} dependent(s), e.g. "
+                + ", ".join(n.node.name for n in dependents[:4]),
+            )
+            neighbours = await graph.neighbourhood(anchor.id, depth=1)
+            block = as_grounding(anchor, neighbours)
+            check(
+                "the subgraph renders as grounding a model can read",
+                "keycloak" in block and len(block) > 40,
+                block.splitlines()[0][:88] if block else "empty",
+            )
+
+        # The grounding a real question would receive, graph blocks first.
+        blocks = await kb.grounding("what depends on the keycloak package?", k=3)
+        check("graph context is placed ahead of retrieved documents", bool(blocks))
+
+        # A refresh of one origin must not empty the others.
+        before = await graph.stats()
+        await kb.refresh(("tools",))
+        after = await graph.stats()
+        check(
+            "refreshing one origin leaves the rest of the graph intact",
+            after["nodes"] >= before["nodes"] - 5,
+            f"{before['nodes']} -> {after['nodes']} nodes",
+        )
 
     print()
     if FAILURES:

@@ -274,6 +274,68 @@ model's — see [§6](#-6-staged-autonomy).
 
 ---
 
+### (d) A task that outlives its request, and changes hands
+
+`/chat` answers inside the request. `/tasks` does not: it returns an id and the
+work continues behind a bounded worker pool.
+
+```
+  Console / Slack / a pull request / a chore
+        │  POST /tasks {"prompt": "…"}
+        ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ agent runtime                                                            │
+  │                                                                          │
+  │  AuthPolicy.principal(request)   ◄══ IDENTITY HERE                       │
+  │  autonomy = principal.ceiling(lower_of(request, ConfigMap))              │
+  │                                                                          │
+  │  stage in (approve-to-apply, scoped)?                                    │
+  │      └─ plan_first():  read-only run, writes a numbered plan, ACTS NOT   │
+  │            -> state=awaiting_approval, NOT enqueued  ◄══ HUMAN GATE      │
+  │                                                                          │
+  │  TaskStore.save()  ──►  agent_task (Postgres)   or memory + a warning    │
+  │  TaskQueue.submit() ──►  asyncio.Queue, 3 workers                        │
+  └───────────────────────────────┬──────────────────────────────────────────┘
+        202-ish: {"id": "task-…"} │      (the caller is done here)
+                                  ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ worker  ->  Orchestrator.execute(task)                                   │
+  │                                                                          │
+  │  AgentRegistry.route(prompt)        lexical, NO model call               │
+  │  stage = agent.ceiling_for(stage)   ◄══ NARROWS AGAIN, never widens      │
+  │  grounding = KnowledgeBase.grounding(prompt)                             │
+  │  history  = ConversationStore.open(task.session)    (a thread remembers) │
+  │                                                                          │
+  │  loop.run(session with agent.tools only)                                 │
+  │       ├── LLM ──► $LLM_GATEWAY_URL                                       │
+  │       └── tools ─► only what this agent declared                         │
+  │                                                                          │
+  │  answer starts "HANDOFF: <agent> — <reason>"?                            │
+  │       ├─ check_handoff(): declared colleague? reason given? depth < 4?   │
+  │       │     └─ refused -> generalist, task.error records why             │
+  │       └─ accepted -> task.hand_to(); LOOP AGAIN as a NEW run             │
+  │                                                                          │
+  │  CoverageLog.observe_run()   -> a gap if it went badly                   │
+  │  TaskStore.save()            -> done | failed                            │
+  └──────────────────────────────────────────────────────────────────────────┘
+```
+
+Three properties are worth stating because each is a deliberate cost:
+
+**The worker pool is bounded.** An agent run is expensive, so an unbounded pool
+turns a burst of queued questions into a burst of concurrent inference spend —
+which is the first thing an operator would cap anyway.
+
+**A plan-gated task is not enqueued.** It is saved and left alone. Enqueueing it
+would have a worker pick it up and run the plan nobody approved.
+
+**Interrupted work is resumed, not resurrected.** At start-up, tasks left in
+`queued`, `planning` or `running` are re-enqueued with `error` set to say they
+were interrupted. The run starts over; what it already did is in the audit
+stream, which is the record.
+
+---
+
 ## ✍️ 4. The write path
 
 There is exactly one. Every write tool in every domain — `propose_change`,
@@ -603,7 +665,11 @@ because it determines the replica count.
 | Response cache | `gateway/cache.py`, in-process TTL'd LRU | 300s, 256 entries, per replica |
 | MCP sessions | `MCPToolbox`, one per domain in an `AsyncExitStack` | process |
 | Lexical index | in memory, built from the docs tree at start-up | process |
-| Chat sessions | **none** — `/chat` is single-turn; `session` is only a tenant label | — |
+| Tasks | `agent_task` table, `adhar-ai-rag` CNPG database | durable, 30-day retention |
+| Tasks (no database) | `OrderedDict` in `TaskStore`, capped at 500 | process — and `/healthz` says `durable: false` |
+| Conversations | `ConversationStore`, bounded LRU per replica | 4 turns, 30 minutes idle |
+| Coverage gaps | `CoverageLog`, bounded to 300 | process |
+| Chore schedule | last-run timestamps in `ChoreRegistry` | process |
 
 ### Findings: memory plus Postgres
 
@@ -687,6 +753,21 @@ detail: [OPERATIONS.md](OPERATIONS.md).
 | Response cache limited to `temperature == 0`, per tenant | cache everything | anything else asks the provider for variation, and cross-tenant sharing turns a cache into a disclosure channel |
 | Audit events on stdout as JSON lines | a Loki write credential in-process | Alloy scrapes container stdout into Loki, so the audit trail is free and the agent holds no write credential for the observability stack |
 | Unkeyed is a *reported* state | crash-loop without a key | the platform must run unaffected until an operator sets the key; `/healthz` says `keyed: false` and the gateway answers 503 on completions (ADR-0024 §9) |
+| An agent's ceiling applied before the caller's | one autonomy stage per request | the narrowing belongs to the ROLE, not the request: a `read-only` guide must stay read-only for an administrator at `scoped`, or specialisation is cosmetic |
+| Handoff is a new run, not a continuation | replay the message history to the receiving agent | continuing would carry the previous agent's tool results into a session that was never allowed to call those tools |
+| Lexical routing between agents | ask a model which agent should answer | spending a completion to decide who spends a completion doubles latency and cost on every request, and misroutes in ways nobody can debug; a keyword miss is a one-line ConfigMap change |
+| Keyword matching on PREFIX, not whole words | `\b…\b` word boundaries | platform vocabulary inflects constantly — crashloop/crashlooping, deploy/deployed — and a whole-word match on the stem misses most real questions |
+| A refused handoff falls back to the generalist | fail the task | refusing is not failing; the generalist can answer anything, so one agent's over-eager forwarding should not kill the work |
+| Tasks degrade to memory without a database | require Postgres for `/tasks` | `docker compose` and a bare `adhar-ai runtime` have no database, and a task that lives for the process is still far more useful than one that lives for the connection — the loss is stated in `/healthz`, not assumed |
+| Plan-and-approve only above `suggest` | always write a plan first | at `read-only` and `suggest` nothing lands without a pull request a human merges, so the run is already reviewable and a plan step is ceremony that costs a completion |
+| Approval needs a write-capable credential | any authenticated caller may approve | a task at `awaiting_approval` is one whose stage can change the platform; releasing it is exactly as privileged as writing, or the gate is decoration |
+| Conversations in process, tasks in Postgres | persist both / persist neither | a conversation is short-lived working context worth a few minutes of latency saving, so a database round trip per turn costs more than it returns; a TASK is what must survive a restart |
+| Chores ship individually disabled and in dry-run | a single `automation: enabled` flag | "turn on automation" is not a decision anyone can reason about; `certificate-expiry` is — and a chore that opens twelve pull requests on a Monday gets the whole layer switched off |
+| An unknown chore name is ignored with a warning | create it from the config | a typo must not be able to bring unreviewed automation into existence |
+| Coverage gaps classified mechanically | ask a model to grade its own answers | expensive, and unreliable in the one direction that matters — a model that produced a bad answer is not well placed to notice |
+| Knowledge graph as recursive CTEs in Postgres | a dedicated graph database | one datastore, one backup, one credential; the queries a blast-radius answer needs are a bounded traversal, not a graph workload |
+| Blast radius follows dependency relations only | traverse every edge | following everything returns the whole connected component, which for a platform is very nearly everything and therefore answers nothing |
+| Graph entity resolution is exact-match | fuzzy name matching | a blast radius computed from the wrong node is confidently wrong, which is the one failure mode the module exists to avoid |
 | Expected failures raised as MCP `ToolError` | let them surface as generic crashes | the SDK withholds a crash's text, so the model could not tell "Prometheus is not configured here" from "the tool crashed" — and the instruction to say so plainly had nothing to say it from |
 
 ---
@@ -696,6 +777,7 @@ detail: [OPERATIONS.md](OPERATIONS.md).
 | Guide | What it covers |
 |---|---|
 | 🚀 [Getting Started](GETTING_STARTED.md) | From `uv sync` to a grounded answer to an opened pull request |
+| 🤖 [Agents & Automation](AGENTS.md) | The specialist roster, durable tasks, approvals, chores and journeys |
 | 🧰 [Tool Reference](TOOLS.md) | Every one of the 27 tools: arguments, backend, failure mode |
 | ⚙️ [Operations](OPERATIONS.md) | Every setting, the health surface, and how to diagnose it |
 | 🔐 [Security](SECURITY.md) | Threat model, the write path, authentication, autonomy, prompt injection |

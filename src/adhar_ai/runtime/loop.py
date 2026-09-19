@@ -78,6 +78,13 @@ class Session:
     #: wherever there is one. Empty against the bundled local-dev gateway, which
     #: requires no token.
     bearer: str = ""
+    #: Prior turns of this conversation, oldest first, as plain role/content
+    #: pairs. Answers only — replaying whole tool transcripts would exhaust the
+    #: window after three questions, and a follow-up refers to the answer.
+    history: list[dict[str, str]] = field(default_factory=list)
+    #: A line naming what the earlier turns already called, so a follow-up does
+    #: not re-run the same reads to be safe.
+    history_note: str = ""
     #: What started this run: `chat` for a person, or the operator's name. A
     #: metric label, so it is a CLOSED set — never a user id, which would make
     #: the cardinality unbounded and eventually take Prometheus down.
@@ -303,10 +310,18 @@ async def run(
             "Describe what you would change; do not claim to have proposed anything."
         )
 
-    messages: list[Message] = [
-        Message(role="system", content=system),
-        Message(role="user", content=prompt),
-    ]
+    if session.history_note:
+        system += f"\n\n## This conversation so far\n\n{session.history_note}"
+
+    messages: list[Message] = [Message(role="system", content=system)]
+    # Prior turns sit between the system prompt and the new question, which is
+    # the only ordering a chat model reads as history rather than as content.
+    for turn in session.history:
+        role = turn.get("role")
+        content = turn.get("content")
+        if role in ("user", "assistant") and content:
+            messages.append(Message(role=role, content=content))  # type: ignore[arg-type]
+    messages.append(Message(role="user", content=prompt))
     specs = toolbox.specs(session.allowed_tools, include_writes=session.may_write)
     result = AgentResult(kind="answer", audit_id=audit_id)
     started = time.monotonic()
@@ -321,6 +336,7 @@ async def run(
                 "adhar.trigger": session.trigger,
                 "adhar.tenant": session.tenant,
                 "adhar.grounding_blocks": len(session.grounding),
+                "adhar.history_turns": len(session.history) // 2,
             },
         ),
     ):

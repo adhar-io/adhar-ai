@@ -37,6 +37,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .documents import Chunk, Document
+from .extract import (
+    ArgoGraphSource,
+    PackageGraphSource,
+    ToolGraphSource,
+    WorkloadGraphSource,
+    candidate_terms,
+)
+from .graph import KnowledgeGraph, as_grounding
 from .lexical import LexicalIndex
 from .sources import (
     ClusterSource,
@@ -64,6 +72,11 @@ class KnowledgeBase:
     lexical: LexicalIndex | None = None
     notes: NotesSource | None = None
     sources: list[Source] = field(default_factory=list)
+    #: The platform's own topology. Joined with vector hits at retrieval time,
+    #: because most platform questions are traversals wearing the clothes of a
+    #: search: "what breaks if X" is a reachability query, not a similarity one.
+    graph: KnowledgeGraph | None = None
+    graph_sources: list[Any] = field(default_factory=list)
     #: Last refresh per origin, for `/knowledge/stats`.
     last_refresh: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -83,6 +96,12 @@ class KnowledgeBase:
     ) -> KnowledgeBase:
         store = KnowledgeStore(dsn, table=table)
         notes = NotesSource(dsn, table=notes_table) if dsn else None
+        graph = KnowledgeGraph(dsn) if dsn else None
+        graph_sources: list[Any] = [ToolGraphSource()]
+        if packages_path:
+            graph_sources.append(PackageGraphSource(packages_path))
+        if toolbox is not None:
+            graph_sources.extend([ArgoGraphSource(toolbox), WorkloadGraphSource(toolbox)])
         sources: list[Source] = [ToolsSource()]
         if docs_path:
             sources.append(DocsSource(docs_path))
@@ -94,12 +113,21 @@ class KnowledgeBase:
             sources.append(FindingsSource(findings))
         if notes is not None:
             sources.append(notes)
-        return cls(store=store, embedder=embedder, notes=notes, sources=sources)
+        return cls(
+            store=store,
+            embedder=embedder,
+            notes=notes,
+            sources=sources,
+            graph=graph,
+            graph_sources=graph_sources,
+        )
 
     async def prepare(self) -> bool:
         ready = await self.store.prepare()
         if self.notes is not None:
             await self.notes.prepare()
+        if self.graph is not None:
+            await self.graph.prepare()
         return ready
 
     @property
@@ -147,8 +175,25 @@ class KnowledgeBase:
                 "at": time.time(),
             }
 
+        await self._refresh_graph(only)
         await self._rebuild_lexical(only)
         return reports
+
+    async def _refresh_graph(self, only: tuple[str, ...] = ()) -> None:
+        """Re-derive the topology. Each source failing costs only its own edges."""
+        if self.graph is None or not self.graph.ready:
+            return
+        for source in self.graph_sources:
+            if only and source.origin not in only:
+                continue
+            try:
+                nodes, edges = await source.extract()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("graph source %s failed: %s", source.origin, exc)
+                continue
+            if nodes or edges:
+                report = await self.graph.replace_origin(source.origin, nodes, edges)
+                self.last_refresh[f"graph:{source.origin}"] = report
 
     async def _rebuild_lexical(self, only: tuple[str, ...] = ()) -> None:
         """Keep the in-process BM25 index in step with the sources.
@@ -206,8 +251,38 @@ class KnowledgeBase:
             for chunk, score in self.lexical.search(query, k)
         ]
 
+    async def graph_context(self, query: str, limit: int = 2) -> list[str]:
+        """Subgraphs for entities the question actually names.
+
+        Only exact resolutions are used. A fuzzy match here would anchor a
+        blast-radius answer on the wrong node and state it with the same
+        confidence as a correct one, which is worse than returning nothing.
+        """
+        if self.graph is None or not self.graph.ready:
+            return []
+        try:
+            anchors = await self.graph.resolve(candidate_terms(query))
+            blocks = []
+            for anchor in anchors[:limit]:
+                neighbours = await self.graph.neighbourhood(anchor.id, depth=1, limit=40)
+                if neighbours:
+                    blocks.append(as_grounding(anchor, neighbours))
+            return blocks
+        except Exception as exc:  # noqa: BLE001
+            log.debug("graph context unavailable: %s", exc)
+            return []
+
     async def grounding(self, query: str, k: int = 5) -> list[str]:
-        return [hit.as_grounding() for hit in await self.search(query, k)]
+        """Passages and topology together.
+
+        The graph blocks go FIRST: when a question names an entity, what that
+        entity connects to is the frame the passages should be read in, and a
+        model given the passages first tends to answer from them and treat the
+        topology as an afterthought.
+        """
+        graph_blocks = await self.graph_context(query)
+        passages = [hit.as_grounding() for hit in await self.search(query, k)]
+        return graph_blocks + passages
 
     async def grounding_with_ids(self, query: str, k: int = 5) -> tuple[list[str], list[int]]:
         """Grounding blocks plus the chunk ids behind them.
@@ -215,9 +290,13 @@ class KnowledgeBase:
         The ids are what makes feedback possible: an answer can be reported
         unhelpful and the store knows exactly which retrieved chunks led to it.
         """
+        graph_blocks = await self.graph_context(query)
         hits = await self.search(query, k)
         return (
-            [hit.as_grounding() for hit in hits],
+            graph_blocks + [hit.as_grounding() for hit in hits],
+            # Graph blocks carry no chunk id: they are derived on every refresh
+            # rather than stored as rows, so there is nothing for feedback to
+            # up- or down-rank.
             [hit.chunk_id for hit in hits if hit.chunk_id >= 0],
         )
 
@@ -294,6 +373,7 @@ class KnowledgeBase:
         stats["sources"] = [s.origin for s in self.sources]
         stats["lastRefresh"] = self.last_refresh
         stats["lexicalChunks"] = self.lexical.size if self.lexical else 0
+        stats["graph"] = await self.graph.stats() if self.graph else {"status": "disabled"}
         return stats
 
 

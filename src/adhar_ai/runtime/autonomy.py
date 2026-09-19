@@ -148,6 +148,10 @@ class RuntimeConfig:
     #: Findings survive a restart in this table, on the same CNPG database the
     #: RAG index uses. No database configured means in-memory only.
     findings_table: str = "finding"
+    #: The specialized agent roster. Empty keeps the shipped six.
+    agents: dict[str, Any] = field(default_factory=dict)
+    #: Chore overrides. Only `enabled` and `dryRun` are usually set.
+    chores: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> RuntimeConfig:
@@ -186,6 +190,8 @@ class RuntimeConfig:
             rag_enabled=bool(rag.get("enabled", True)),
             rag_table=str(rag.get("table", "kb_chunk")),
             findings_table=str((data.get("findings") or {}).get("table", "finding")),
+            agents=dict(data.get("agents") or {}),
+            chores=dict(data.get("chores") or {}),
         )
 
     @classmethod
