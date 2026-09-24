@@ -126,6 +126,16 @@ for w in ("propose_change", "propose_xr", "propose_exception", "scaffold"):
 PY
 
 step "Grounding works with no key and no database"
+# The lexical index is built in a BACKGROUND task, so /healthz answers before
+# it is ready and reports `unavailable` for a second or two. Polling here is
+# not papering over a flake: the readiness probe is deliberately not gated on
+# the index, because a runtime that can answer without grounding should start
+# serving rather than stay down. So wait for it, with a bound.
+for _ in $(seq 1 40); do
+  curl -fsS "http://127.0.0.1:${RUNTIME_PORT}/healthz" > "${HEALTH}"
+  grep -q '"rag": *"[^"]*lexical' "${HEALTH}" && break
+  sleep 0.5
+done
 uv run python - "${HEALTH}" <<'PY' && pass "lexical retrieval is live" || fail "no grounding available"
 import json, sys
 mode = json.load(open(sys.argv[1]))["rag"]
@@ -253,6 +263,60 @@ the checkout pod is crashlooping|incident
 why did our spend jump last month?|cost
 how do I scaffold a new Go service?|guide
 ROUTES
+
+step "/chat goes through the roster, not past it"
+# The defect this guards: /chat used to run a generic assistant holding every
+# read tool, so the specialists existed, were listed, were routable — and were
+# reached by nothing a person actually used.
+while IFS='|' read -r q want; do
+  [[ -z "${q}" ]] && continue
+  got=$(curl -fsS "${A}/chat" -H 'content-type: application/json' \
+        -d "{\"prompt\":\"${q}\"}" | jsonfield agent)
+  if [[ "${got}" == "${want}" ]]; then pass "chat: ${q} -> ${got}"; else fail "chat: ${q} -> ${got}, wanted ${want}"; fi
+done <<'CHATROUTES'
+the checkout pod is crashlooping|incident
+why did our spend jump last month?|cost
+how do I scaffold a new Go service?|guide
+CHATROUTES
+
+step "Each agent is offered only its own tools"
+curl -fsS "${A}/chat" -H 'content-type: application/json' \
+  -d '{"prompt":"why did our spend jump last month?"}' > "${WORK}/chat-cost.json"
+curl -fsS "${A}/agents" > "${WORK}/agents.json"
+uv run python - "${WORK}/chat-cost.json" "${WORK}/agents.json" <<'CHECK' && pass "the cost agent got the cost tools and nothing else" || fail "an agent was handed the whole toolbox"
+import json, sys
+answer = json.load(open(sys.argv[1]))
+roster = {a["name"]: a for a in json.load(open(sys.argv[2]))["agents"]}
+assert answer["agent"] == "cost", answer["agent"]
+declared = set(roster["cost"]["tools"])
+used = {c["tool"] for c in answer.get("tool_calls", [])}
+assert used <= declared, f"called {used - declared}, which it never declared"
+print(f"      cost declares {len(declared)} tools; the whole surface is 27")
+CHECK
+
+step "A read-only agent stays read-only"
+curl -fsS "${A}/chat" -H 'content-type: application/json' \
+  -d '{"prompt":"how do I scaffold a new Go service?","autonomy":"scoped"}' > "${WORK}/chat-guide.json"
+uv run python - "${WORK}/chat-guide.json" <<'CHECK' && pass "the guide could not be talked up to scoped" || fail "an agent ceiling was widened by the request"
+import json, sys
+a = json.load(open(sys.argv[1]))
+assert a["agent"] == "guide", a["agent"]
+assert a["autonomy"] == "read-only", a["autonomy"]
+assert not a.get("pull_requests"), a["pull_requests"]
+CHECK
+
+step "Chat answers do not pile up in the task list"
+before=$(curl -fsS "${A}/tasks" | jsonfield count)
+for i in 1 2 3 4 5; do
+  curl -fsS "${A}/chat" -H 'content-type: application/json' \
+    -d "{\"prompt\":\"throwaway question ${i} about pods\"}" > /dev/null
+done
+after=$(curl -fsS "${A}/tasks" | jsonfield count)
+if [[ "${before}" == "${after}" ]]; then
+  pass "5 chat messages added 0 task rows (still ${after})"
+else
+  fail "5 chat messages added $((after - before)) task row(s)"
+fi
 
 step "A task outlives the request that created it"
 TASK=$(curl -fsS "${A}/tasks" -H 'content-type: application/json' \

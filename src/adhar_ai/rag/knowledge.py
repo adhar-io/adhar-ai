@@ -272,26 +272,35 @@ class KnowledgeBase:
             log.debug("graph context unavailable: %s", exc)
             return []
 
-    async def grounding(self, query: str, k: int = 5) -> list[str]:
+    async def grounding(
+        self, query: str, k: int = 5, kinds: tuple[str, ...] = ()
+    ) -> list[str]:
         """Passages and topology together.
 
         The graph blocks go FIRST: when a question names an entity, what that
         entity connects to is the frame the passages should be read in, and a
         model given the passages first tends to answer from them and treat the
         topology as an afterthought.
+
+        `kinds` narrows the passages to what a particular agent should read —
+        the security agent to ADRs, runbooks and incidents, the guide to
+        documentation. The TOPOLOGY is never narrowed: what a thing connects to
+        is true regardless of who is asking.
         """
         graph_blocks = await self.graph_context(query)
-        passages = [hit.as_grounding() for hit in await self.search(query, k)]
+        passages = [hit.as_grounding() for hit in await self.search(query, k, kinds)]
         return graph_blocks + passages
 
-    async def grounding_with_ids(self, query: str, k: int = 5) -> tuple[list[str], list[int]]:
+    async def grounding_with_ids(
+        self, query: str, k: int = 5, kinds: tuple[str, ...] = ()
+    ) -> tuple[list[str], list[int]]:
         """Grounding blocks plus the chunk ids behind them.
 
         The ids are what makes feedback possible: an answer can be reported
         unhelpful and the store knows exactly which retrieved chunks led to it.
         """
         graph_blocks = await self.graph_context(query)
-        hits = await self.search(query, k)
+        hits = await self.search(query, k, kinds)
         return (
             graph_blocks + [hit.as_grounding() for hit in hits],
             # Graph blocks carry no chunk id: they are derived on every refresh

@@ -50,7 +50,7 @@ from .intake import (
 )
 from .journeys import parse as parse_journey
 from .journeys import render as render_journey
-from .loop import GatewayClient, Session, run
+from .loop import GatewayClient
 from .operators import REGISTRY, OperatorContext
 from .orchestrator import Orchestrator, plan_first
 from .sessions import ConversationStore
@@ -142,6 +142,9 @@ class ChatRequest(BaseModel):
     user: str | None = None
     autonomy: str | None = None
     model: str | None = None
+    #: Address a specialist directly instead of letting the router choose.
+    #: Same field as `/tasks`, so the two routes take the same body.
+    agent: str = ""
 
 
 def create_app(
@@ -374,63 +377,82 @@ def create_app(
 
     @app.post("/chat")
     async def chat(request: Request, body: ChatRequest = Body(...)) -> dict[str, Any]:
+        """One agent run, answered inside the request.
+
+        This goes through the SAME roster as `/tasks`: the question is routed
+        to a specialist, that agent's ceiling narrows the stage, and it is
+        offered only its own tools and grounded only on the kinds it should
+        read. Before, this route ran a generic assistant holding all 27 tools —
+        so the roster existed, was listed, was routable, and was reached by
+        nothing a person actually used.
+
+        What stays different from `/tasks` is the LIFETIME, which is the only
+        thing that should differ: this answers now, that outlives the request.
+        """
         principal: Principal = policy.principal(request)
         _admit(app, principal.subject)
+
+        # The caller may ask for a LOWER stage than the ConfigMap's, never a
+        # higher one, and `ceiling` then pins an unauthenticated or
+        # non-write-group caller to read-only whatever either of them said. The
+        # agent's own ceiling narrows it once more, inside the orchestrator.
+        requested = body.autonomy or config.default_autonomy
+        task = Task(
+            prompt=body.prompt,
+            agent=body.agent,
+            requester=principal.subject,
+            autonomy=principal.ceiling(lower_of(requested, config.default_autonomy)),
+            trigger="chat",
+            session=body.session or "",
+        )
+
+        with app.state.drain:
+            answer = await app.state.orchestrator.answer(
+                task,
+                # The caller's own token, so agentgateway meters this run's
+                # spend against the caller's Keycloak group rather than the
+                # runtime's service account.
+                bearer=await policy.bearer_for(principal),
+                tenant=(
+                    principal.subject
+                    if principal.authenticated
+                    else (body.user or body.session or "anonymous")
+                ),
+                model=body.model or "",
+                # An answer inside the request is not a task. Persisting one
+                # row per chat message would bury the long-running work
+                # `/tasks` exists to show, and the audit stream already has it.
+                persist=False,
+            )
+
+        if answer.result is None:
+            # Every agent forwarded and none answered. `answer.task` already
+            # carries the failure; say so rather than returning an empty body.
+            raise HTTPException(
+                status_code=503,
+                detail={"error": task.error or "no agent produced an answer"},
+            )
+
+        payload = answer.result.as_dict()
+        payload["agent"] = answer.agent
+        payload["routing_confidence"] = answer.confidence
+        payload["grounded_on"] = [
+            block.split("\n", 1)[0].lstrip("# ") for block in answer.grounding
+        ]
+        payload["principal"] = principal.as_dict()
+        payload["autonomy"] = app.state.orchestrator.ceiling_for(task, answer.agent)
+        # Returned so a caller can say whether this grounding helped; POST them
+        # back to /feedback and the store learns which chunks are worth ranking.
+        payload["grounding_chunk_ids"] = answer.chunk_ids
+        # The orchestrator already recorded the turn and the coverage gap —
+        # doing either again here would double-count both.
         conversation = (
-            app.state.conversations.open(body.session, principal.subject)
+            app.state.conversations.get(body.session, principal.subject)
             if body.session
             else None
         )
-        grounding: list[str] = []
-        chunk_ids: list[int] = []
-        if app.state.knowledge is not None:
-            grounding, chunk_ids = await app.state.knowledge.grounding_with_ids(
-                body.prompt, k=5
-            )
-        # The caller may ask for a LOWER stage than the ConfigMap's, never a
-        # higher one, and `ceiling` then pins an unauthenticated or
-        # non-write-group caller to read-only whatever either of them said.
-        requested = body.autonomy or config.default_autonomy
-        session = Session(
-            autonomy=principal.ceiling(lower_of(requested, config.default_autonomy)),
-            tenant=principal.subject if principal.authenticated else (
-                body.user or body.session or "anonymous"
-            ),
-            user=principal.subject if principal.authenticated else body.user,
-            model=body.model,
-            max_steps=config.max_steps,
-            max_tool_calls=config.max_tool_calls_per_op,
-            grounding=grounding,
-            write_policy=config.write_policy,
-            # The caller's own token, so agentgateway meters this run's spend
-            # against the caller's Keycloak group rather than the runtime's.
-            bearer=await policy.bearer_for(principal),
-            # Prior turns, so "and what should I do about it?" does not
-            # re-investigate from scratch.
-            history=conversation.history() if conversation else [],
-            history_note=conversation.context_note() if conversation else "",
-        )
-        with app.state.drain:
-            result = await run(
-                app.state.gateway, app.state.toolbox, session, body.prompt, config
-            )
-        payload = result.as_dict()
-        payload["grounded_on"] = [g.split("\n", 1)[0].lstrip("# ") for g in grounding]
-        payload["principal"] = principal.as_dict()
-        payload["autonomy"] = session.autonomy
-        # Returned so a caller can say whether this grounding helped; POST them
-        # back to /feedback and the store learns which chunks are worth ranking.
-        payload["grounding_chunk_ids"] = chunk_ids
         if conversation is not None:
-            conversation.record(
-                body.prompt,
-                result.text,
-                [c["tool"] for c in result.tool_calls],
-            )
             payload["session"] = conversation.as_dict()
-        app.state.coverage.observe_run(
-            body.prompt, result, agent="chat", grounded=bool(grounding)
-        )
         return payload
 
     @app.post("/operators/{name}/event")
@@ -635,27 +657,23 @@ def create_app(
             session=journey.session,
         )
         with app.state.drain:
-            task = await app.state.orchestrator.execute(task)
+            answer = await app.state.orchestrator.answer(task)
+        task = answer.task
 
-        conversation = app.state.conversations.get(journey.session, principal.subject)
-        checked = (
-            [{"tool": tool} for turn in conversation.turns for tool in turn.tools]
-            if conversation
-            else []
-        )
-        result = SimpleNamespace(
+        # The run's OWN result. Reading the tool names back out of the
+        # conversation store was a reconstruction: it included every earlier
+        # turn in the thread, so a reply's "what I checked" footer claimed
+        # tools this answer never called.
+        result = answer.result or SimpleNamespace(
             text=task.result,
             kind="error" if task.error else "answer",
             error=task.error,
             pull_requests=task.artifacts,
-            # What the run actually called. The renderer prints these under
-            # "what I checked", so a plan step here would claim a tool that
-            # does not exist.
-            tool_calls=checked,
+            tool_calls=[],
         )
         return {
             "task": task.id,
-            "agent": task.agent,
+            "agent": answer.agent or task.agent,
             "reply": render_journey(result, journey),
         }
 

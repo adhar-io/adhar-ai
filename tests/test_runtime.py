@@ -171,6 +171,10 @@ class FakeGateway:
                 "tools": list(tools or []),
                 "tenant": tenant,
                 "bearer": bearer,
+                # Recorded because under agentgateway the model name is the
+                # ROUTING KEY: a run that drops it reaches a different model,
+                # or none. A fake blind to it cannot catch that.
+                "model": model,
             }
         )
         return self.turns.pop(0)

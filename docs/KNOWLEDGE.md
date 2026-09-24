@@ -326,6 +326,11 @@ curl -X POST localhost:8080/knowledge/search \
 Filter by kind with `{"kinds": ["runbook", "incident"]}` when you want procedure
 rather than rationale.
 
+This is the same filter each **agent** applies to its own grounding: the
+security agent reads ADRs, runbooks and incidents, the guide reads documentation
+and packages. The graph blocks are never filtered — what a thing connects to is
+true regardless of who is asking.
+
 ---
 
 ## 7. Operating it

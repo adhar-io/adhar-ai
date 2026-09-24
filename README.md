@@ -173,9 +173,11 @@ latency on every request. An agent may hand work on, but only to a colleague it
 declared, only with a stated reason, and only four times before the chain is
 refused as a loop.
 
-**Work outlives the request.** `POST /chat` answers inside the request, which is
-right for a question and wrong for an investigation that takes twenty minutes or
-a plan that waits on a human. `POST /tasks` returns an id immediately; the work
+**`/chat` and `/tasks` run the same roster.** Both route, both apply the agent's
+ceiling, both scope the tools and the grounding. The only difference is the
+lifetime: `/chat` answers inside the request and writes no task row, because one
+row per chat message would bury the real work. `POST /tasks` returns an id
+immediately; the work
 runs behind a bounded worker pool, survives a restart where a database is
 configured, and reports its own state:
 
@@ -232,7 +234,7 @@ clients are wired up.
 |---|---|
 | `GET /healthz` | posture: connected MCP servers, grounding mode, auth, findings store |
 | `GET /config` | the effective autonomy policy, read back |
-| `POST /chat` | one agent run — an answer, or a proposed pull request |
+| `POST /chat` | one agent run, routed to a specialist — an answer, or a proposed pull request |
 | `POST /operators/{name}/event` | operator webhook (Alertmanager, ArgoCD notifications) |
 | `GET /findings` | what the operators concluded |
 | `GET /knowledge` | what the knowledge base holds, by origin and kind |
@@ -400,7 +402,7 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 
 ```bash
 uv sync --extra rag
-uv run pytest -q                       # 498 tests (517 with a database)
+uv run pytest -q                       # 511 tests (530 with a database)
 uv run ruff check src tests
 uv run mypy src
 uv run adhar-ai tools | diff -u contract/tools.json -   # the Go-CLI contract
@@ -502,7 +504,7 @@ Phase 3 agentic entry.
 
 | Capability | Status |
 |---|---|
-| MCP-native tools, 7 domains, PR-only writes | ✅ 498 tests, 517 with a database |
+| MCP-native tools, 7 domains, PR-only writes | ✅ 511 tests, 530 with a database |
 | Federated MCP over streamable HTTP at `/mcp` | ✅ verified against the Host headers a Pod actually receives |
 | GitOps-safe runtime, four-rung autonomy ladder | ✅ each rung behaviourally distinct and tested |
 | Authentication on the runtime's own surface | ✅ Keycloak JWT, webhook token, outbound service-account token |
@@ -510,7 +512,7 @@ Phase 3 agentic entry.
 | Durable findings | ✅ Postgres-backed, degrades to memory |
 | Production controls — metrics, tracing, resilience, admission, safety | ✅ `/metrics` on every component, dashboard drift-tested against the registry |
 | Quality gates — behavioural red team, scenario evals | ✅ both in CI; the live eval graded a real model and found a real bug |
-| Specialist agents, routing, handoff with a depth cap | ✅ ceiling narrowing and refusal paths tested; handoff verified over real HTTP |
+| Specialist agents, routing, handoff with a depth cap | ✅ reached by `/chat` as well as `/tasks`; ceiling narrowing and refusal paths tested; handoff verified over real HTTP |
 | Durable tasks, plan-and-approve, bounded workers | ✅ state machine refuses illegal moves; approval needs a write credential |
 | Knowledge graph over the same Postgres | ✅ verified against a real database: traversal, blast radius, cycles, per-origin refresh |
 | Chores, journeys, capability catalogue, coverage gaps | ✅ every chore ships off and in dry-run, asserted as policy |

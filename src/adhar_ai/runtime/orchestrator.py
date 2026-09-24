@@ -27,12 +27,13 @@ approves, so it is written first and the task waits.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..observability import metrics
 from .agents import GENERALIST, AgentRegistry, HandoffError, check_handoff
 from .autonomy import RuntimeConfig, lower_of
-from .loop import Session, run
+from .loop import AgentResult, Session, run
 from .tasks import PlanStep, Task, TaskError
 
 log = logging.getLogger("adhar_ai.orchestrator")
@@ -50,6 +51,37 @@ HANDOFF_PROMPT = (
     "Only hand over when the work genuinely needs their tools; answering is "
     "almost always better than forwarding."
 )
+
+
+@dataclass(slots=True)
+class _Attempt:
+    """One agent turn that actually reached a model."""
+
+    result: AgentResult
+    grounding: list[str] = field(default_factory=list)
+    chunk_ids: list[int] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class Answer:
+    """What one orchestrated run produced.
+
+    A `Task` is the durable row: state, lineage, the final text. It does not
+    carry the things an interactive caller needs to render — which tools were
+    called, how many steps it took, which chunks were retrieved. `/journeys`
+    used to reconstruct those by reading the conversation store back, which is
+    a guess. This carries them directly.
+    """
+
+    task: Task
+    #: `None` only if the run never reached a model — every agent forwarded.
+    result: AgentResult | None = None
+    agent: str = ""
+    confidence: float = 0.0
+    #: Grounding behind the FINAL answer. After a handoff the receiving agent
+    #: re-grounds under its own knowledge scope, so this is that agent's.
+    grounding: list[str] = field(default_factory=list)
+    chunk_ids: list[int] = field(default_factory=list)
 
 
 class Orchestrator:
@@ -81,11 +113,19 @@ class Orchestrator:
 
     def route(self, task: Task) -> str:
         """Decide which agent holds this task, if it does not already say."""
+        return self.route_with_confidence(task)[0]
+
+    def route_with_confidence(self, task: Task) -> tuple[str, float]:
+        """As `route`, but says how sure it was.
+
+        An agent named on the task is certain by construction: somebody chose
+        it, so there is nothing for the router to be unsure about.
+        """
         if task.agent and task.agent in self.registry:
-            return task.agent
+            return task.agent, 1.0
         agent, confidence = self.registry.route(task.prompt)
         log.info("task %s routed to %s (confidence %.2f)", task.id, agent, confidence)
-        return agent
+        return agent, confidence
 
     def ceiling_for(self, task: Task, agent_name: str) -> str:
         """The stage this run may actually reach.
@@ -104,31 +144,91 @@ class Orchestrator:
     # ------------------------------------------------------------ the work --
 
     async def execute(self, task: Task) -> Task:
-        """Drive a task to a terminal state, following handoffs."""
+        """Drive a task to a terminal state, following handoffs.
+
+        This is the queue's entry point, so it returns the durable row. An
+        interactive caller wants the run itself — use `answer`.
+        """
+        return (await self.answer(task)).task
+
+    async def answer(
+        self,
+        task: Task,
+        *,
+        bearer: str = "",
+        tenant: str = "",
+        model: str = "",
+        persist: bool = True,
+    ) -> Answer:
+        """Drive a task to a terminal state and report what the run produced.
+
+        `bearer`, `tenant` and `model` exist for the interactive path. A person
+        asking a question must reach the gateway as THEMSELVES: their token
+        meters their spend against their own Keycloak group, and their tenant
+        is what a budget is kept against. Unattended work has no caller, so it
+        falls back to the runtime's service account and an `agent:` tenant.
+
+        `persist=False` runs the task WITHOUT writing it to the task store. An
+        interactive answer is not a task: it does not outlive its request, so
+        a row for it is pure cost — chat traffic would fill the table and bury
+        the long-running work `/tasks` exists to show. The run is still in the
+        audit stream, which is the record.
+        """
+        outcome = Answer(task=task)
         for _ in range(len(self.registry.names) + 1):
-            agent_name = self.route(task)
+            agent_name, confidence = self.route_with_confidence(task)
             if task.agent != agent_name:
                 task.hand_to(agent_name, "routed")
 
-            outcome = await self._run_once(task)
-            if outcome is None:
-                return task
+            handed, attempt = await self._run_once(
+                task, bearer=bearer, tenant=tenant, model=model, persist=persist
+            )
+            if attempt is not None:
+                outcome.result = attempt.result
+                outcome.grounding = attempt.grounding
+                outcome.chunk_ids = attempt.chunk_ids
+            outcome.agent = task.agent or agent_name
+            outcome.confidence = confidence
+            if handed is None:
+                outcome.task = task
+                return outcome
             # A handoff: loop and run again under the new agent's constraints.
-            task = outcome
+            task = handed
         # Only reachable if every agent forwards, which `check_handoff` already
         # caps — belt to its braces.
         task.transition("failed", reason="the task was forwarded without ever being answered")
-        return task
+        outcome.task = task
+        return outcome
 
-    async def _run_once(self, task: Task) -> Task | None:
-        """One agent's attempt. Returns the task if it handed over, else `None`."""
+    async def _run_once(
+        self,
+        task: Task,
+        *,
+        bearer: str = "",
+        tenant: str = "",
+        model: str = "",
+        persist: bool = True,
+    ) -> tuple[Task | None, _Attempt | None]:
+        """One agent's attempt.
+
+        Returns `(task, attempt)` where the task is non-`None` only if the
+        agent handed the work on, and the attempt is `None` only in that case —
+        a forwarded turn produced no answer to report.
+        """
         agent = self.registry.get(task.agent or GENERALIST)
         stage = self.ceiling_for(task, agent.name)
 
         grounding: list[str] = []
+        chunk_ids: list[int] = []
         if self.knowledge is not None:
             try:
-                grounding = await self.knowledge.grounding(task.prompt, k=5)
+                # Scoped to what this agent should read. The security agent
+                # grounds on ADRs, runbooks and incidents; the guide on
+                # documentation. An agent given the whole corpus is a
+                # generalist wearing a label.
+                grounding, chunk_ids = await self.knowledge.grounding_with_ids(
+                    task.prompt, k=5, kinds=agent.knowledge_kinds
+                )
             except Exception as exc:  # noqa: BLE001
                 log.debug("grounding unavailable for task %s: %s", task.id, exc)
 
@@ -136,7 +236,7 @@ class Orchestrator:
             task.transition("running", reason=f"{agent.name} picked it up")
         elif task.state == "awaiting_approval":
             task.transition("running", reason="approved")
-        await self._save(task)
+        await self._save(task, persist)
 
         system_extra = agent.instructions
         if agent.escalates_to:
@@ -151,14 +251,18 @@ class Orchestrator:
         session = Session(
             autonomy=stage,
             allowed_tools=agent.tools,
-            tenant=f"agent:{agent.name}",
+            # A caller's own tenant where there is one, so a budget is kept
+            # against the person rather than against the role they happened to
+            # be routed to.
+            tenant=tenant or f"agent:{agent.name}",
+            model=model or None,
             user=task.requester if task.requester != "anonymous" else None,
             trigger=task.trigger,
             grounding=grounding,
             write_policy=self.config.write_policy,
             max_steps=self.config.max_steps,
             max_tool_calls=self.config.max_tool_calls_per_op,
-            bearer=await self._bearer(),
+            bearer=bearer or await self._bearer(),
             # A task raised from a Slack thread or a pull request continues the
             # conversation it came from; one raised by a chore has none.
             history=conversation.history() if conversation else [],
@@ -175,9 +279,11 @@ class Orchestrator:
         result = await run(self.gateway, self.toolbox, session, prompt, self.config)
         task.audit_id = result.audit_id
 
+        attempt = _Attempt(result=result, grounding=grounding, chunk_ids=chunk_ids)
+
         handoff = _parse_handoff(result.text)
         if handoff is not None:
-            return await self._hand_over(task, handoff)
+            return await self._hand_over(task, handoff, persist), None
 
         task.result = result.text
         task.artifacts.extend(result.pull_requests)
@@ -191,7 +297,9 @@ class Orchestrator:
             conversation.record(
                 task.prompt, result.text, [c["tool"] for c in result.tool_calls]
             )
-            if task.id not in conversation.task_ids:
+            # Only a task that was actually stored can be looked up later, so
+            # an unpersisted interactive run leaves no dangling id behind.
+            if persist and task.id not in conversation.task_ids:
                 conversation.task_ids.append(task.id)
 
         if self.coverage is not None:
@@ -208,10 +316,12 @@ class Orchestrator:
             task.transition("failed", reason=result.error[:120])
         else:
             task.transition("done", reason=result.kind)
-        await self._save(task)
-        return None
+        await self._save(task, persist)
+        return None, attempt
 
-    async def _hand_over(self, task: Task, handoff: tuple[str, str]) -> Task:
+    async def _hand_over(
+        self, task: Task, handoff: tuple[str, str], persist: bool = True
+    ) -> Task:
         """Transfer the task, or refuse and make the agent answer instead."""
         target, reason = handoff
         try:
@@ -233,7 +343,7 @@ class Orchestrator:
             )
         )
         task.hand_to(checked.to, checked.reason)
-        await self._save(task)
+        await self._save(task, persist)
         return task
 
     async def _bearer(self) -> str:
@@ -246,8 +356,8 @@ class Orchestrator:
         except Exception:  # noqa: BLE001
             return ""
 
-    async def _save(self, task: Task) -> None:
-        if self.store is not None:
+    async def _save(self, task: Task, persist: bool = True) -> None:
+        if persist and self.store is not None:
             await self.store.save(task)
 
 

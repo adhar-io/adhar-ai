@@ -140,11 +140,17 @@ checked and who calls the LLM.
   │       JWT verified against the realm JWKS; `groups` -> write_allowed     │
   │       no credential -> anonymous Principal, write_allowed = False        │
   │                                                                          │
-  │  2. Retriever.grounding(prompt, k=5)     pgvector cosine, else BM25      │
+  │  2. autonomy = principal.ceiling(lower_of(request, ConfigMap default))   │
   │                                                                          │
-  │  3. autonomy = principal.ceiling(lower_of(request, ConfigMap default))   │
+  │  3. Orchestrator.answer(task, persist=False)  ◄══ SAME ROSTER AS /tasks  │
+  │       AgentRegistry.route(prompt)   lexical, no model call               │
+  │       stage = agent.ceiling_for(stage)        narrows again, never wider │
+  │       grounding(prompt, kinds=agent.knowledge_kinds)                     │
+  │                                     pgvector cosine, else BM25           │
+  │       a `HANDOFF:` reply is FOLLOWED here, not shown to the asker        │
   │                                                                          │
   │  4. loop.run()  — plan / act / observe, <= maxSteps, <= maxToolCalls     │
+  │       offered ONLY this agent's tools, never all 27                      │
   │       │                                                                  │
   │       ├── LLM ──► POST $LLM_GATEWAY_URL/chat/completions                 │
   │       │      body NAMES a model; X-Adhar-Tenant + Authorization          │
@@ -156,8 +162,21 @@ checked and who calls the LLM.
   └──────────────────────────────────────────────────────────────────────────┘
         ▼
    {"kind": "answer" | "proposed" | "budget_exhausted" | "error",
+    "agent": "incident", "routing_confidence": 0.5,
     "grounded_on": [...], "principal": {...}, "autonomy": "..."}
 ```
+
+`/chat` and `/tasks` run the **same** orchestrator over the **same** roster.
+The only thing that differs is the lifetime, which is the only thing that
+should: `/chat` answers inside the request and writes no task row, because one
+row per chat message would bury the long-running work `/tasks` exists to show —
+the audit stream is that run's record. `/tasks` returns an id and the work
+outlives the request.
+
+The caller's own bearer, tenant and model choice are carried into the run
+rather than replaced by the agent's. A person's question must reach the gateway
+as that person: their token meters their spend against their own Keycloak
+group, and a budget is kept against them rather than pooled per role.
 
 Note the runtime reaches the seven MCP servers **directly** by ClusterIP, using
 the `mcpServers` map in the `adhar-ai-config` ConfigMap — not through the
@@ -667,6 +686,7 @@ because it determines the replica count.
 | Lexical index | in memory, built from the docs tree at start-up | process |
 | Tasks | `agent_task` table, `adhar-ai-rag` CNPG database | durable, 30-day retention |
 | Tasks (no database) | `OrderedDict` in `TaskStore`, capped at 500 | process — and `/healthz` says `durable: false` |
+| Chat runs | **no task row** — the audit stream is the record | the request |
 | Conversations | `ConversationStore`, bounded LRU per replica | 4 turns, 30 minutes idle |
 | Coverage gaps | `CoverageLog`, bounded to 300 | process |
 | Chore schedule | last-run timestamps in `ChoreRegistry` | process |
@@ -768,6 +788,9 @@ detail: [OPERATIONS.md](OPERATIONS.md).
 | Knowledge graph as recursive CTEs in Postgres | a dedicated graph database | one datastore, one backup, one credential; the queries a blast-radius answer needs are a bounded traversal, not a graph workload |
 | Blast radius follows dependency relations only | traverse every edge | following everything returns the whole connected component, which for a platform is very nearly everything and therefore answers nothing |
 | Graph entity resolution is exact-match | fuzzy name matching | a blast radius computed from the wrong node is confidently wrong, which is the one failure mode the module exists to avoid |
+| `/chat` runs the same roster as `/tasks` | a generic assistant on the interactive route | a roster reached only by `/tasks` and webhooks is a roster nobody uses — the Console and the CLI go through `/chat`, so that is where specialisation has to happen or it may as well not exist |
+| A chat run writes no task row | persist every run for a uniform audit | chat volume would fill a 30-day table and bury the long-running work `/tasks` exists to show; the audit stream already records every run |
+| The caller's bearer and tenant survive routing | run everything as the agent | a budget is kept per person; re-labelling interactive runs `agent:cost` pools every user's spend into one bucket per role |
 | Expected failures raised as MCP `ToolError` | let them surface as generic crashes | the SDK withholds a crash's text, so the model could not tell "Prometheus is not configured here" from "the tool crashed" — and the instruction to say so plainly had nothing to say it from |
 
 ---

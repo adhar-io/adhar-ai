@@ -15,12 +15,30 @@ merges.
 
 ---
 
-## 1. The task
+## 1. Two routes, one roster
 
-`POST /chat` answers inside the request. That is right for a question and wrong
-for work: an investigation that needs twenty minutes, a plan that waits for
-approval, a job that outlives the rollout that interrupts it. A **task** is that
-work.
+`POST /chat` and `POST /tasks` run the **same** orchestrator over the **same**
+roster. Both route to a specialist, apply that agent's ceiling, offer only its
+tools and ground it only on the kinds it should read.
+
+The one thing that differs is the lifetime, which is the one thing that should:
+
+| | `/chat` | `/tasks` |
+|---|---|---|
+| Answers | inside the request | behind it, poll for the result |
+| Survives a restart | no | yes, where a database is configured |
+| Leaves a task row | no | yes |
+| Can wait for an approval | no | yes |
+
+A chat run writes no task row on purpose. One row per message would fill a
+table with 30-day retention at chat volume and bury the long-running work
+`/tasks` exists to show. The audit stream is that run's record.
+
+So use `/chat` for a question and `/tasks` for work: an investigation that needs
+twenty minutes, a plan that waits for approval, a job that outlives the rollout
+that interrupts it.
+
+## 2. The task
 
 ```bash
 curl -sS $RUNTIME/tasks -H 'content-type: application/json' \
@@ -60,7 +78,7 @@ burst of queued questions into a burst of concurrent inference spend.
 
 ---
 
-## 2. The roster
+## 3. The roster
 
 Seven agents ship. Each is a role, a narrow tool list, an autonomy **ceiling**
 and a closed list of colleagues it may hand work to.
@@ -74,6 +92,11 @@ and a closed list of colleagues it may hand work to.
 | `release` | promotion, drift, sync failures, rollback | `approve-to-apply` |
 | `guide` | how-to, onboarding, conventions, documentation | `read-only` |
 | `generalist` | everything else — routing always terminates here | `suggest` |
+
+Each agent also declares the **kinds of knowledge it should read** — the
+security agent grounds on ADRs, runbooks and incidents; the guide on
+documentation and packages. The topology from the knowledge graph is never
+narrowed: what a thing connects to is true regardless of who is asking.
 
 **The ceiling narrows and never widens.** A `read-only` agent stays read-only
 for a platform administrator at `scoped`, because the narrowing belongs to the
@@ -149,7 +172,7 @@ agents:
 
 ---
 
-## 3. Plan first, then approve
+## 4. Plan first, then approve
 
 At `read-only` and `suggest` the run is already reviewable: nothing lands
 without a pull request somebody merges, so a plan step would be ceremony that
@@ -172,7 +195,7 @@ decorative. A rejection is recorded on the plan with who rejected it and why.
 
 ---
 
-## 4. Chores
+## 5. Chores
 
 Scheduled, narrow, individually enabled automation. This is where an agentic
 platform earns its keep and where it does the most damage when wrong: a chore
@@ -217,7 +240,7 @@ curl -sS -X POST $RUNTIME/chores/cost-outliers/run  # run one now, within its ow
 
 ---
 
-## 5. Journeys
+## 6. Journeys
 
 An agent behind its own URL is a destination people have to remember to visit.
 Adoption comes from it turning up where the work already is.
@@ -254,7 +277,7 @@ people argue with.
 
 ---
 
-## 6. Discovery, and a platform that teaches itself
+## 7. Discovery, and a platform that teaches itself
 
 ### What can I ask?
 
@@ -300,10 +323,11 @@ in a way nobody reports, over and over, until people stop asking.
 
 ---
 
-## 7. The routes
+## 8. The routes
 
 | Route | What it does |
 |---|---|
+| `POST /chat` | one agent run, answered inside the request |
 | `POST /tasks` | start work that outlives the request |
 | `GET /tasks` · `GET /tasks/{id}` | what is running, and what one task did |
 | `POST /tasks/{id}/approve` | release or reject a plan — needs a writer |

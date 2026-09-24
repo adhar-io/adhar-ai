@@ -19,6 +19,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from adhar_ai.config import RuntimeEnv
+from adhar_ai.runtime.agents import AgentRegistry
 from adhar_ai.runtime.app import create_app
 from adhar_ai.runtime.auth import AuthPolicy, Principal
 from adhar_ai.runtime.autonomy import RuntimeConfig
@@ -421,3 +422,183 @@ def test_healthz_reports_every_new_subsystem(runtime):
     assert health["chores"]["enabled"] == []
     assert health["conversations"]["conversations"] == 0
     assert health["coverage"]["gaps"] == 0
+
+
+# ------------------------------------------------- chat goes through agents --
+#
+# These are the regression tests for the defect that made the whole roster
+# invisible in practice: `/chat` ran a generic assistant holding every tool,
+# while the specialists existed, were listed at `/agents`, were routable at
+# `/agents/route`, and were reached by nothing a person actually used.
+
+
+def test_chat_routes_to_a_specialist_and_says_which(runtime):
+    client, _, _ = runtime
+    body = client.post("/chat", json={"prompt": "the checkout pod is crashlooping"}).json()
+    assert body["agent"] == "incident"
+    assert body["routing_confidence"] > 0
+
+
+def test_chat_offers_only_the_routed_agents_tools(runtime):
+    """The defect this file exists for.
+
+    Before, every question was answered with the whole read surface, so a cost
+    question could read pod logs and a how-to question could diff an app.
+    """
+    client, _, gateway = runtime
+    client.post("/chat", json={"prompt": "why did our spend jump last month?"})
+
+    offered = {spec.function.name for spec in gateway.requests[-1]["tools"]}
+    allowed = set(AgentRegistry().get("cost").tools)
+    assert offered, "no tools were offered at all"
+    assert offered <= allowed, f"cost agent was handed {offered - allowed}"
+
+
+def test_two_different_questions_get_two_different_tool_sets(runtime):
+    """A roster that offers the same tools to everyone is not a roster."""
+    client, _, gateway = runtime
+    client.post("/chat", json={"prompt": "the checkout pod is crashlooping"})
+    incident_tools = {s.function.name for s in gateway.requests[-1]["tools"]}
+    client.post("/chat", json={"prompt": "how do I scaffold a new Go service?"})
+    guide_tools = {s.function.name for s in gateway.requests[-1]["tools"]}
+
+    assert incident_tools != guide_tools
+    assert guide_tools < incident_tools or not (guide_tools & incident_tools)
+
+
+def test_chat_carries_the_agents_own_instructions(runtime):
+    client, _, gateway = runtime
+    client.post("/chat", json={"prompt": "the checkout pod is crashlooping"})
+    sent = " ".join(str(m.content or "") for m in gateway.requests[-1]["messages"])
+    assert "You are on call" in sent, "the agent's role instructions never reached the model"
+
+
+def test_chat_applies_the_agents_ceiling_not_just_the_callers():
+    """A `read-only` agent stays read-only for a caller who may write.
+
+    The caller here is write-capable and the ConfigMap default is `suggest`,
+    so without the agent's own ceiling this run would reach `suggest` and be
+    offered the PR-opening tools. The narrowing belongs to the ROLE.
+    """
+    app, _, gateway = build(policy=ByHeader())
+    with TestClient(app) as client:
+        writer = {"X-Writer": "yes"}
+        # A writer asking an `incident` question does reach `suggest`.
+        incident = client.post(
+            "/chat", json={"prompt": "the checkout pod is crashlooping"}, headers=writer
+        ).json()
+        assert incident["agent"] == "incident"
+        assert incident["autonomy"] == "suggest"
+        assert any(
+            s.function.name == "propose_change" for s in gateway.requests[-1]["tools"]
+        )
+
+        # The same writer asking the `guide` does not.
+        guide = client.post(
+            "/chat",
+            json={"prompt": "how do I scaffold a new Go service?", "autonomy": "scoped"},
+            headers=writer,
+        ).json()
+        assert guide["agent"] == "guide"
+        assert guide["autonomy"] == "read-only"
+        assert not any(
+            s.function.name == "propose_change" for s in gateway.requests[-1]["tools"]
+        )
+
+
+def test_chat_can_address_a_specialist_directly(runtime):
+    client, _, _ = runtime
+    body = client.post("/chat", json={"prompt": "anything at all", "agent": "security"}).json()
+    assert body["agent"] == "security"
+    # Naming an agent is a choice, not a guess.
+    assert body["routing_confidence"] == 1.0
+
+
+def test_chat_still_meters_against_the_caller_not_the_agent(runtime):
+    """Budgets are kept per caller.
+
+    Routing must not silently re-label every interactive run as `agent:cost`,
+    which would pool every user's spend into one bucket per role.
+    """
+    client, _, gateway = runtime
+    client.post("/chat", json={"prompt": "why did our spend jump?", "session": "s-budget"})
+    assert gateway.requests[-1]["tenant"] == "s-budget"
+    assert not gateway.requests[-1]["tenant"].startswith("agent:")
+
+
+def test_chat_honours_a_requested_model(runtime):
+    """The model name is agentgateway's routing key, so dropping it misroutes."""
+    client, _, gateway = runtime
+    client.post("/chat", json={"prompt": "why is it down?", "model": "anthropic/claude-x"})
+    assert gateway.requests[-1]["model"] == "anthropic/claude-x"
+
+
+def test_a_handoff_in_chat_is_followed_rather_than_shown_to_the_user(runtime):
+    """Otherwise the person reads the literal string `HANDOFF: security — …`."""
+    app, _, gateway = build(
+        turns=[
+            _answer("HANDOFF: security — this restart follows a policy denial"),
+            _answer("Kyverno is blocking the pod."),
+        ]
+    )
+    with TestClient(app) as client:
+        body = client.post("/chat", json={"prompt": "the pod is crashlooping"}).json()
+    assert "HANDOFF" not in body["text"]
+    assert body["agent"] == "security"
+    assert "Kyverno" in body["text"]
+
+
+def test_chat_grounding_is_scoped_to_what_the_agent_should_read(runtime):
+    """`knowledge_kinds` was declared on every agent and read by nothing."""
+    client, _, _ = runtime
+    asked: list[tuple] = []
+
+    class Knowledge:
+        async def grounding_with_ids(self, query, k=5, kinds=()):
+            asked.append((query, kinds))
+            return ["# a passage"], [7]
+
+    client.app.state.orchestrator.knowledge = Knowledge()
+    body = client.post("/chat", json={"prompt": "is this image vulnerable to a CVE?"}).json()
+
+    assert body["agent"] == "security"
+    assert asked and asked[-1][1] == AgentRegistry().get("security").knowledge_kinds
+    assert body["grounding_chunk_ids"] == [7]
+    assert body["grounded_on"] == ["a passage"]
+
+
+def test_chat_records_one_turn_and_one_coverage_gap_not_two(runtime):
+    """Both the route and the orchestrator used to be able to record these."""
+    client, _, _ = runtime
+    client.post("/chat", json={"prompt": "how do I rotate the signing key?", "session": "s1"})
+    body = client.post("/chat", json={"prompt": "and the other one?", "session": "s1"}).json()
+
+    assert body["session"]["turns"] == 2
+    assert client.get("/coverage").json()["gaps"] == 2
+
+
+def test_chat_does_not_leave_a_task_row_behind(runtime):
+    """An answer inside the request is not a task.
+
+    One row per chat message would bury the long-running work `/tasks` exists
+    to show, and would fill a table with 30-day retention at chat volume.
+    """
+    client, _, _ = runtime
+    for i in range(5):
+        client.post("/chat", json={"prompt": f"question {i} about pods"})
+    assert client.get("/tasks").json()["count"] == 0
+
+    # A real task still lands.
+    task = client.post("/tasks", json={"prompt": "why is argocd degraded?"}).json()
+    _settle(client, task["id"])
+    assert client.get("/tasks").json()["count"] == 1
+
+
+def test_a_chat_session_records_no_task_id_it_cannot_resolve(runtime):
+    """A dangling id in the session is worse than no id."""
+    client, _, _ = runtime
+    client.post("/chat", json={"prompt": "why is it down?", "session": "s-dangle"})
+    body = client.post("/chat", json={"prompt": "and now?", "session": "s-dangle"}).json()
+    for task_id in body["session"]["tasks"]:
+        assert client.get(f"/tasks/{task_id}").status_code == 200, task_id
+    assert body["session"]["tasks"] == []
