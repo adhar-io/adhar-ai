@@ -294,3 +294,9 @@ def test_the_dockerfile_and_workflow_agree_on_the_build_args():
     assert "ADHAR_AI_REVISION=${REVISION}" in dockerfile
     assert "ADHAR_AI_BUILD_VERSION=${VERSION}" in dockerfile
     assert "build-args:" in workflow
+
+    # `git describe` needs the tags, and actions/checkout fetches none by
+    # default. Without this every build off `main` reports 0.0.0 — and `main`
+    # is what publishes `:latest`, which is what the platform deploys.
+    assert "fetch-depth: 0" in workflow
+    assert "git describe" in workflow

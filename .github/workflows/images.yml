@@ -23,6 +23,11 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags, so a build off `main` can name the release it descends from.
+          # The default shallow clone has none, and `git describe` would then
+          # silently fall back to 0.0.0 on every build.
+          fetch-depth: 0
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -51,9 +56,20 @@ jobs:
             NAMES="$NAMES adhar-ai-mcp-$d"
           done
 
+          # A tag build IS the release. A build off `main` descends from one,
+          # and says so: `0.2.0+sha.abc123456789`.
+          #
+          # This matters because `:latest` is what the platform deploys, and
+          # both kinds of build push it — whichever finishes last wins. Without
+          # this, a release tag and its own `main` commit race, and the loser
+          # leaves `:latest` reporting a version that names no release at all.
           VERSION=""
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
+            RELEASE_VERSION="${VERSION}"
+          else
+            DESCRIBED="$(git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
+            RELEASE_VERSION="${DESCRIBED#v}+sha.${GITHUB_SHA::12}"
           fi
 
           TAGS=""
@@ -69,9 +85,7 @@ jobs:
           {
             echo "names=${NAMES}"
             echo "tags=${TAGS%,}"
-            # On a branch build there is no release version, so report the
-            # short SHA rather than an empty string that reads as "unset".
-            echo "version=${VERSION:-0.0.0-sha.${GITHUB_SHA::12}}"
+            echo "version=${RELEASE_VERSION}"
           } >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
