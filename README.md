@@ -41,8 +41,9 @@ application is degraded and it reads the real pods, the real logs, the real sync
 status and the real burn rate, then tells you — citing every source. Ask it to
 fix the problem and it opens a pull request.
 
-> ⚠️ **Active development.** APIs and tool schemas may change. The container
-> images are not yet published to GHCR — see [Project status](#-project-status).
+> ⚠️ **Active development.** APIs and tool schemas may change. Images are
+> published to GHCR as `ghcr.io/adhar-io/adhar-ai-{runtime,mcp-<domain>}` —
+> see [Project status](#-project-status).
 
 ---
 
@@ -517,7 +518,8 @@ Phase 3 agentic entry.
 | Knowledge graph over the same Postgres | ✅ verified against a real database: traversal, blast radius, cycles, per-origin refresh |
 | Chores, journeys, capability catalogue, coverage gaps | ✅ every chore ships off and in dry-run, asserted as policy |
 | **Live run against a real LLM and a real cluster** | ✅ **see below** |
-| **Container images on GHCR** | ⏳ **the remaining gate** |
+| Container images on GHCR | ✅ eight names from one build, Cosign-keyless signed with an SPDX SBOM attached |
+| The running build is identifiable | ✅ `/healthz` reports `version` and the commit `revision`, baked in at build time |
 | GPU run of the `ai/vllm` profile | ⏳ needs a GPU node pool |
 | Self-hosted inference on CPU via `ai/llm-d` (router + agentgateway sidecar → vLLM), provider `local` | ⏳ built 2026-09-15, awaiting the DigitalOcean end-to-end run |
 | Tool re-discovery without a runtime restart (`MCPToolbox.refresh()`) | ✅ unit-tested (a rolled MCP server used to need a restart) |
@@ -549,10 +551,18 @@ That run also found four defects the unit suite could not, all since fixed:
 | A transport failure raised `CancelledError` | `except Exception` does not catch it, so it killed the whole agent run |
 | The runtime sent no bearer to the LLM gateway | which runs JWT validation in `Strict` mode, so no agent run could reach a model |
 
-**Still outstanding.** The images are not published, so the platform package has
-nothing to pull and the components have not run *as Deployments in a cluster* —
-the live run drove them from a workstation against that cluster's services. The
-build, sign and SBOM workflow is committed and its smoke test passes locally.
+**Still outstanding.** The components have not yet run *as Deployments in a
+cluster* — the live run drove them from a workstation against that cluster's
+services. The images are published and the platform package already points at
+them, so this is a rollout rather than a build.
+
+One caveat that applies to every Adhar-owned component, this one and the Console
+alike: the manifests track `:latest` with `imagePullPolicy: Always`, and an
+unchanged Deployment spec is not drift. ArgoCD will not restart pods when a new
+`:latest` is pushed, so picking up a new build needs
+`kubectl rollout restart deployment -n adhar-system -l app.kubernetes.io/part-of=adhar-ai`
+(or any change that recreates the pods). `/healthz` now reports the `revision`
+it is actually running, so the result can be checked rather than assumed.
 
 ---
 

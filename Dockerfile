@@ -36,11 +36,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ----------------------------------------------------------------- runtime ---
 FROM python:3.12-slim
 
+# Stamped by CI from the commit being built. Every image the platform runs is
+# tagged `:latest` with `imagePullPolicy: Always`, which is the right default
+# for an Adhar-owned component and leaves exactly one problem: nothing on the
+# cluster can say WHICH build is running. `/healthz` reports this, so a rollout
+# can be verified rather than assumed.
+ARG REVISION=unknown
+ARG VERSION=0.0.0
+
 LABEL org.opencontainers.image.title="adhar-ai" \
       org.opencontainers.image.description="Adhar AI — MCP tool servers and the GitOps-safe agent runtime (ADR-0024)" \
       org.opencontainers.image.source="https://github.com/adhar-io/adhar-ai" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      adhar.io/origin="adhar-ai"
+      adhar.io/origin="adhar-ai" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.version="${VERSION}"
 
 # libpq is needed by psycopg for the pgvector RAG store.
 RUN apt-get update \
@@ -52,11 +62,15 @@ RUN apt-get update \
 COPY --from=builder --chown=65532:65532 /app/.venv /app/.venv
 COPY --from=builder --chown=65532:65532 /app/src /app/src
 
+ARG REVISION
+ARG VERSION
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH=/app/src \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    HOME=/home/nonroot
+    HOME=/home/nonroot \
+    ADHAR_AI_REVISION=${REVISION} \
+    ADHAR_AI_BUILD_VERSION=${VERSION}
 
 WORKDIR /app
 USER 65532:65532

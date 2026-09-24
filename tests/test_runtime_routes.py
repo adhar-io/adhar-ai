@@ -321,3 +321,11 @@ def test_findings_are_gated_like_chat() -> None:
         assert client.get("/config").status_code == 401
         # The probe stays open: a readinessProbe presents no credential.
         assert client.get("/healthz").status_code == 200
+
+
+def test_healthz_names_the_build_that_answered(open_runtime, monkeypatch) -> None:
+    """Everything runs `:latest`, so a rollout can otherwise only be assumed."""
+    client, _, _ = open_runtime
+    health = client.get("/healthz").json()
+    assert health["version"]
+    assert "revision" in health

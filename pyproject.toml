@@ -1,6 +1,6 @@
 [project]
 name = "adhar-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "Adhar AI — MCP-native tool servers, a provider-agnostic LLM gateway, and a GitOps-safe agent runtime for the Adhar platform (ADR-0024)."
 readme = "README.md"
 requires-python = ">=3.12"

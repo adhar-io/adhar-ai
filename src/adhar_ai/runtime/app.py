@@ -31,6 +31,7 @@ from fastapi import Path as PathParam
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+from .. import build_info
 from ..config import RuntimeEnv, env, env_int
 from ..observability import METRICS_CONTENT_TYPE, metrics, setup_tracing
 from ..provenance import ORIGIN_LABEL_KEY, ORIGIN_LABEL_VALUE
@@ -302,6 +303,9 @@ def create_app(
         return JSONResponse(
             {
                 "status": "ok",
+                # Which build answered. Everything runs `:latest`, so without
+                # this a rollout can only be assumed, never confirmed.
+                **build_info(),
                 "autonomy_default": config.default_autonomy,
                 "operators": sorted(config.operators),
                 # Derived from LIVE sessions. This used to be the set of

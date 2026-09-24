@@ -69,6 +69,9 @@ jobs:
           {
             echo "names=${NAMES}"
             echo "tags=${TAGS%,}"
+            # On a branch build there is no release version, so report the
+            # short SHA rather than an empty string that reads as "unset".
+            echo "version=${VERSION:-0.0.0-sha.${GITHUB_SHA::12}}"
           } >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
@@ -78,6 +81,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.tags }}
+          # Baked in, so a pod running `:latest` can say which build it is.
+          build-args: |
+            REVISION=${{ github.sha }}
+            VERSION=${{ steps.tags.outputs.version }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -127,6 +134,15 @@ jobs:
           # Every domain's tool inventory must load. This is what the MCP
           # servers serve, and a missing domain is a silently empty tool list.
           docker run --rm --entrypoint adhar-ai "$IMG" tools
+
+          # The build stamp must have survived. Without it every pod running
+          # `:latest` is anonymous, and a rollout cannot be verified.
+          rev=$(docker run --rm --entrypoint printenv "$IMG" ADHAR_AI_REVISION)
+          echo "image reports revision ${rev}"
+          if [ "${rev}" != "${GITHUB_SHA}" ]; then
+            echo "::error::image revision ${rev} is not the commit ${GITHUB_SHA}"
+            exit 1
+          fi
 
           # One MCP server must come up and answer its health probe, which is
           # exactly what the Deployment's readinessProbe does.

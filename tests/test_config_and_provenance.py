@@ -235,3 +235,62 @@ def test_mcp_servers_carry_no_oidc_validation_settings_by_default(monkeypatch):
     cfg = MCPConfig.from_env()
     assert cfg.oidc_issuer_url == ""
     assert cfg.oidc_client_id == "adhar-ai"
+
+
+# ------------------------------------------------------------ build identity --
+
+
+def test_the_package_version_matches_pyproject():
+    """Two places hold the number, so they must be asserted equal.
+
+    A release tags `vX.Y.Z` and the workflow publishes `:X.Y.Z` from the tag,
+    while the running code reports `__version__`. If those drift, `/healthz`
+    confidently names a version that was never built.
+    """
+    import tomllib
+    from pathlib import Path
+
+    import adhar_ai
+
+    root = Path(__file__).resolve().parents[1]
+    declared = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    assert adhar_ai.__version__ == declared
+
+
+def test_build_info_is_honest_when_nothing_stamped_it(monkeypatch):
+    """A local run has no revision. Inventing one would be worse than saying so."""
+    from adhar_ai import build_info
+
+    monkeypatch.delenv("ADHAR_AI_REVISION", raising=False)
+    monkeypatch.delenv("ADHAR_AI_BUILD_VERSION", raising=False)
+    info = build_info()
+    assert info["revision"] == "unknown"
+    assert info["version"]
+
+
+def test_build_info_reports_what_ci_stamped(monkeypatch):
+    from adhar_ai import build_info
+
+    monkeypatch.setenv("ADHAR_AI_REVISION", "a" * 40)
+    monkeypatch.setenv("ADHAR_AI_BUILD_VERSION", "9.9.9")
+    assert build_info() == {"version": "9.9.9", "revision": "a" * 40}
+
+
+def test_the_dockerfile_and_workflow_agree_on_the_build_args():
+    """The stamp only works if all three spell it the same way.
+
+    A rename in one place leaves every pod reporting `unknown`, which is the
+    silent-failure mode this whole mechanism exists to avoid.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    dockerfile = (root / "Dockerfile").read_text()
+    workflow = (root / ".github/workflows/images.yml").read_text()
+
+    for arg in ("REVISION", "VERSION"):
+        assert f"ARG {arg}" in dockerfile, arg
+        assert f"{arg}=${{{{" in workflow, f"the workflow never passes {arg}"
+    assert "ADHAR_AI_REVISION=${REVISION}" in dockerfile
+    assert "ADHAR_AI_BUILD_VERSION=${VERSION}" in dockerfile
+    assert "build-args:" in workflow
