@@ -43,7 +43,7 @@ jobs:
             echo "::error::tag ${TAG} but pyproject declares ${declared}; use hack/release.sh"
             exit 1
           fi
-          grep -q "release-${VERSION}-" README.md || {
+          grep -q "adhar--ai-${VERSION}-" README.md || {
             echo "::error::README badge does not show ${VERSION}; use hack/release.sh"; exit 1; }
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 

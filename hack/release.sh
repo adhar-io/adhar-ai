@@ -2,12 +2,13 @@
 #
 # release.sh — cut a release of adhar-ai.
 #
-#   ./hack/release.sh 0.3.0            # bump, verify, commit, tag, push
-#   ./hack/release.sh 0.3.0 --dry-run  # everything except commit/tag/push
+#   ./hack/release.sh                  # next PATCH (0.3.0 -> 0.3.1): bump, verify, commit, tag, push
+#   ./hack/release.sh --dry-run        # the same, without commit/tag/push
+#   ./hack/release.sh 0.4.0            # a deliberate minor (or major) bump
 #
 # What a release IS here:
 #   1. ONE version, in every place that states it: pyproject.toml,
-#      src/adhar_ai/__init__.py, uv.lock, and the README's version badge.
+#      src/adhar_ai/__init__.py, uv.lock, and the README's `adhar-ai` badge.
 #      A test asserts they agree, so a release cannot ship with the README
 #      saying one number and /healthz another.
 #   2. A commit that changes only those files, and an annotated tag `vX.Y.Z`.
@@ -33,12 +34,23 @@ DRY_RUN="${2:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
 
+# No version given, or `--dry-run` alone: the next PATCH. Releases are routine
+# and most of them are fixes; a minor or major bump is a deliberate choice and
+# is spelled out on the command line.
+if [[ "${VERSION}" == "--dry-run" ]]; then
+  DRY_RUN="--dry-run"; VERSION=""
+fi
+if [[ -z "${VERSION}" ]]; then
+  CUR="$(grep -m1 '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
+  VERSION="${CUR%.*}.$(( ${CUR##*.} + 1 ))"
+fi
+
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 step()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 die()   { red "error: $*"; exit 1; }
 
-[[ -n "${VERSION}" ]] || die "usage: $0 X.Y.Z [--dry-run]"
+[[ -n "${VERSION}" ]] || die "usage: $0 [X.Y.Z] [--dry-run]   (no version = next patch)"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must be X.Y.Z, got ${VERSION}"
 [[ -z "${DRY_RUN}" || "${DRY_RUN}" == "--dry-run" ]] || die "unknown argument ${DRY_RUN}"
 
@@ -69,8 +81,10 @@ trap 'red "release aborted; tree restored"; restore' ERR
 step "Writing ${VERSION} into every place that states a version"
 sed -i.bak "s/^version = \"${CURRENT}\"/version = \"${VERSION}\"/" pyproject.toml && rm pyproject.toml.bak
 sed -i.bak "s/^__version__ = \"${CURRENT}\"/__version__ = \"${VERSION}\"/" src/adhar_ai/__init__.py && rm src/adhar_ai/__init__.py.bak
-# The README badge, which is the version a reader sees first.
-sed -i.bak "s|/release-v${CURRENT}-|/release-v${VERSION}-|; s|/badge/release-[0-9.]*-|/badge/release-${VERSION}-|" README.md && rm README.md.bak
+# The README badge, which is the version a reader sees first. There is ONE:
+# the `adhar-ai` badge. (A second `release` badge once sat beside it and the
+# two disagreed, which is exactly the failure a single badge prevents.)
+sed -i.bak "s|/badge/adhar--ai-[0-9.]*-|/badge/adhar--ai-${VERSION}-|" README.md && rm README.md.bak
 # The lock records the project's own version.
 uv lock -q
 

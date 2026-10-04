@@ -261,7 +261,12 @@ def test_the_package_version_matches_pyproject():
     # README saying one number while /healthz says another is the failure
     # this line exists to make impossible.
     readme = (root / "README.md").read_text()
-    assert f"badge/release-{declared}-" in readme, "README release badge does not match pyproject"
+    assert f"badge/adhar--ai-{declared}-" in readme, "README badge does not match pyproject"
+    # And exactly one version badge. Two once sat side by side and disagreed.
+    import re
+
+    assert len(re.findall(r"badge/adhar--ai-[0-9.]+-", readme)) == 1
+    assert "badge/release-" not in readme
 
 
 def test_build_info_is_honest_when_nothing_stamped_it(monkeypatch):

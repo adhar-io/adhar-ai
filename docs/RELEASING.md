@@ -4,9 +4,13 @@
 > refuses to do is listed here.
 
 ```bash
-./hack/release.sh 0.3.0            # bump, verify, commit, tag, push
-./hack/release.sh 0.3.0 --dry-run  # everything except commit, tag and push
+./hack/release.sh                  # next patch (0.3.0 -> 0.3.1): bump, verify, commit, tag, push
+./hack/release.sh --dry-run        # the same, without commit, tag and push
+./hack/release.sh 0.4.0            # a deliberate minor or major bump
 ```
+
+Releases are routine and most are fixes, so **the default is the next patch**.
+A minor or major bump is a decision, and is spelled out on the command line.
 
 ---
 
@@ -14,7 +18,7 @@
 
 | Artefact | Where | Produced by |
 |---|---|---|
-| One version number | `pyproject.toml`, `src/adhar_ai/__init__.py`, `uv.lock`, the README badge | `hack/release.sh`, asserted equal by the test suite |
+| One version number | `pyproject.toml`, `src/adhar_ai/__init__.py`, `uv.lock`, the README's `adhar-ai` badge | `hack/release.sh`, asserted equal by the test suite |
 | An annotated tag `vX.Y.Z` on `main` | GitHub | `hack/release.sh` |
 | Eight images at `:X.Y.Z`, `:latest` and `:sha-<commit>` | `ghcr.io/adhar-io/adhar-ai-{runtime,mcp-<domain>}` | `.github/workflows/images.yml`, on the tag and on the push to `main` |
 | Keyless signatures and an SPDX SBOM on each image | the registry, by digest | `images.yml` |
@@ -66,8 +70,9 @@ nothing applies to a cluster* — is not versioned. It does not change.
 
 ## 4. The README is part of the release
 
-The README states the current version in its badge, and `hack/release.sh`
-rewrites it in the same commit as `pyproject.toml`. A test
+The README states the current version in exactly one badge, the `adhar-ai`
+one, and `hack/release.sh` rewrites it in the same commit as `pyproject.toml`.
+There used to be a second badge beside it, and the two disagreed. A test
 (`tests/test_config_and_provenance.py`) asserts the three agree, and
 `release.yml` refuses to publish a Release whose tag the README does not show.
 
