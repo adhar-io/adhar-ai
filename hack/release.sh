@@ -58,6 +58,14 @@ if [[ "$(printf '%s\n%s\n' "${CURRENT}" "${VERSION}" | sort -V | tail -1)" != "$
 fi
 
 # ------------------------------------------------------------------- bump ---
+# From here until the commit, any failure must put the tree back. A release
+# that fails verification and leaves four bumped files behind looks like a
+# half-made release to the next person, and blocks the next run of this script.
+restore() {
+  git checkout -q -- pyproject.toml src/adhar_ai/__init__.py README.md uv.lock 2>/dev/null || true
+}
+trap 'red "release aborted; tree restored"; restore' ERR
+
 step "Writing ${VERSION} into every place that states a version"
 sed -i.bak "s/^version = \"${CURRENT}\"/version = \"${VERSION}\"/" pyproject.toml && rm pyproject.toml.bak
 sed -i.bak "s/^__version__ = \"${CURRENT}\"/__version__ = \"${VERSION}\"/" src/adhar_ai/__init__.py && rm src/adhar_ai/__init__.py.bak
@@ -82,10 +90,15 @@ green "  lint, types, contract and ${CURRENT}->${VERSION} drift tests pass"
 # ---------------------------------------------------------- commit + tag ---
 if [[ "${DRY_RUN}" == "--dry-run" ]]; then
   step "Dry run — restoring the tree"
-  git checkout -q -- pyproject.toml src/adhar_ai/__init__.py README.md uv.lock
+  trap - ERR
+  restore
   green "  nothing committed, tagged or pushed"
   exit 0
 fi
+
+# Past verification: a failure from here on is a push problem, not a tree
+# problem, and the commit below is what we want kept.
+trap - ERR
 
 step "Committing and tagging v${VERSION}"
 git add pyproject.toml src/adhar_ai/__init__.py README.md uv.lock

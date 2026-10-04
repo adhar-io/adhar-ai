@@ -42,8 +42,11 @@ QUESTIONS: tuple[Question, ...] = (
     ),
     Question(
         ask="what packages are enabled in production that are not enabled locally?",
-        expect=("environment production", "environment local"),
+        # The platform renamed its environment directories (production -> prod);
+        # either spelling is the right document.
+        expect=("environment prod", "environment production", "environment local"),
         kind="environment",
+        why="with four environments indexed, a section titled only 'Enabled packages' is anyone's",
     ),
     Question(
         ask="what database does keycloak use and where is its secret?",

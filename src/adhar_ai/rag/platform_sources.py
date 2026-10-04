@@ -232,25 +232,32 @@ class EnvironmentSource:
             namespaces = sorted({str(p.get("namespace")) for p in enabled if p.get("namespace")})
 
             alias = str(data.get("environment") or name)
+            # The name appears in EVERY heading. Documents are chunked on
+            # headings, so a section titled "Enabled packages" alone does not
+            # say which environment it describes — and with four environments
+            # indexed, "what is enabled in prod" could land on any of them.
+            label = f"`{name}`" + (f" (`{alias}`)" if alias != name else "")
             lines = [
-                f"# Environment `{name}`" + (f" (`{alias}`)" if alias != name else ""),
+                f"# Environment {label}",
                 "",
-                f"Type `{data.get('type', 'unknown')}`. {len(enabled)} of {len(rows)} packages "
-                f"enabled, deploying into "
+                f"Packages enabled in the {name} environment"
+                + (f", also called {alias}" if alias != name else "")
+                + f". Type `{data.get('type', 'unknown')}`. {len(enabled)} of {len(rows)} "
+                f"packages enabled, deploying into "
                 f"{', '.join(f'`{n}`' for n in namespaces) or 'no namespace'}.",
                 "",
-                "## Enabled packages",
+                f"## Enabled packages in {label}",
                 "",
             ]
             for category in sorted(by_category):
                 names = ", ".join(f"`{n}`" for n in sorted(by_category[category]))
                 lines.append(f"- **{category}**: {names}")
-            lines += ["", "## Disabled packages", ""]
+            lines += ["", f"## Disabled packages in {label}", ""]
             disabled.sort(key=lambda p: str(p.get("name")))
             lines.append(", ".join(f"`{p.get('name')}`" for p in disabled) or "none")
             lines += [
                 "",
-                "## Where each enabled package comes from",
+                f"## Where each enabled package in {label} comes from",
                 "",
             ]
             for p in sorted(enabled, key=lambda p: str(p.get("name"))):
