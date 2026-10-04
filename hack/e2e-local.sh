@@ -136,24 +136,34 @@ step "Grounding works with no key and no database"
 # not papering over a flake: the readiness probe is deliberately not gated on
 # the index, because a runtime that can answer without grounding should start
 # serving rather than stay down. So wait for it, with a bound.
-# ...and then the FULL index: the documentation alone is published within a
-# second so the runtime answers at once, and the manifests, environments and
-# CLI follow a few seconds later. Reading the count before they land is how
-# this check once reported 1,187 chunks while the log showed 4,000 arriving.
+# ...and then the index is COMPLETE. The documentation alone is published
+# within a second so the runtime answers at once; the other sources follow a
+# few seconds later, and reading the count before they land once reported
+# 1,187 chunks while the log showed 4,000 arriving.
+#
+# What "complete" means depends on what this machine has. With a platform
+# checkout (a workstation), the manifests, environments and CLI take the index
+# past 3,500 chunks, and anything less means a source is silently contributing
+# nothing. In CI there is no checkout and DOCS is this repository's own docs:
+# a few hundred chunks, and the assertion is that retrieval is LIVE at all.
+if [[ -d "${REPO}/platform/stack/packages" ]]; then
+  MIN_CHUNKS=3500
+else
+  MIN_CHUNKS=1
+fi
 for _ in $(seq 1 180); do
   curl -fsS "http://127.0.0.1:${RUNTIME_PORT}/healthz" > "${HEALTH}"
   n=$(grep -o '([0-9]* chunks)' "${HEALTH}" | grep -o '[0-9]*' || echo 0)
-  [[ "${n:-0}" -gt 3500 ]] && break
+  [[ "${n:-0}" -ge "${MIN_CHUNKS}" ]] && break
   sleep 0.5
 done
-uv run python - "${HEALTH}" <<'PY' && pass "lexical retrieval is live over the whole platform" || fail "no grounding available"
+uv run python - "${HEALTH}" "${MIN_CHUNKS}" <<'PY' && pass "lexical retrieval is live (${MIN_CHUNKS}+ chunks expected here)" || fail "no grounding available"
 import json, re, sys
 mode = json.load(open(sys.argv[1]))["rag"]
+minimum = int(sys.argv[2])
 assert "lexical" in mode, mode
-# Docs alone are ~1,200 chunks. Manifests, environments and the CLI take the
-# index past 3,500 — if it is not, a source is silently contributing nothing.
 chunks = int((re.search(r"\((\d+) chunks\)", mode) or [0, 0])[1])
-assert chunks > 3500, f"only {chunks} chunks indexed: {mode}"
+assert chunks >= minimum, f"only {chunks} chunks indexed, expected at least {minimum}: {mode}"
 print(f"      {mode}")
 PY
 
