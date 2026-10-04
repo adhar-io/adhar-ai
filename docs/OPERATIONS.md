@@ -175,7 +175,12 @@ Accepted algorithms are `RS256`, `RS512` and `ES256`. The subject is
 | Variable | Default | What it does |
 |---|---|---|
 | `ADHAR_AI_CONFIG` | unset | Path to `config.yaml`. `--config` sets it into the environment for the process. A missing file falls back to the shipped defaults rather than failing. |
-| `ADHAR_AI_DOCS_PATH` | `/etc/adhar-ai/docs` | Docs tree for both retrieval paths. A missing path disables ingestion; it does not crash the runtime. |
+| `ADHAR_AI_DOCS_PATH` | `/etc/adhar-ai/docs` (or `$ADHAR_AI_REPO_PATH/docs`) | Docs tree for both retrieval paths. A missing path disables ingestion; it does not crash the runtime. |
+| `ADHAR_AI_REPO_PATH` | unset | A checkout of the `adhar` repository. Sets the defaults for the three paths below and for the docs, which is how a workstation indexes the whole platform. |
+| `ADHAR_AI_PACKAGES_PATH` | `$ADHAR_AI_REPO_PATH/platform/stack/packages` | Package contracts and manifests. |
+| `ADHAR_AI_ENVIRONMENTS_PATH` | `$ADHAR_AI_REPO_PATH/platform/stack/environments` | Per-environment package enablement. |
+| `ADHAR_AI_CLI_PATH` | `$ADHAR_AI_REPO_PATH` | The repository root whose `cmd/` holds the Cobra CLI definitions. |
+| `GITEA_API_URL` | unset on the runtime | When set and the paths above do not exist, the same content is read from Gitea's `packages`, `environments` and `adhar` repositories — anonymously, no token. This is the in-cluster configuration. |
 | `ADHAR_AI_RAG_DSN` → `RAG_DSN` → `DATABASE_URL` | composed from `RAG_DB_*` (below) | pgvector DSN. Also the findings store's database. |
 | `RAG_DB_HOST` → `host` | `""` | If no DSN was given and no host is set, the DSN is empty and RAG runs lexical-only. |
 | `RAG_DB_NAME` → `dbname` | `adhar_ai_rag` | |

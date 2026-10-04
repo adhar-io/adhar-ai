@@ -20,6 +20,11 @@ set -euo pipefail
 BASE_PORT="${BASE_PORT:-18301}"
 RUNTIME_PORT="${RUNTIME_PORT:-18310}"
 DOCS="${DOCS:-../adhar/docs}"
+# The checkout the docs live in. With it, the runtime also indexes the
+# manifests, the environments and the CLI — the same four sources the
+# in-cluster runtime reads from Gitea — so the lexical index here holds the
+# whole platform rather than its documentation alone.
+REPO="${REPO:-$(cd "$(dirname "${DOCS}")" 2>/dev/null && pwd || echo "")}"
 WORK="$(mktemp -d)"
 DOMAINS=(cluster gitops provision observability security cost catalog)
 
@@ -98,7 +103,7 @@ step "Starting the agent runtime against all seven"
   done
 } > "${WORK}/config.yaml"
 
-ADHAR_AI_DOCS_PATH="${DOCS}" \
+ADHAR_AI_DOCS_PATH="${DOCS}" ADHAR_AI_REPO_PATH="${REPO}" \
 LLM_GATEWAY_URL="http://127.0.0.1:1" \
   uv run adhar-ai runtime --config "${WORK}/config.yaml" --listen=":${RUNTIME_PORT}" \
   >"${WORK}/runtime.log" 2>&1 &
@@ -115,12 +120,12 @@ HEALTH="${WORK}/health.json"
 curl -fsS "http://127.0.0.1:${RUNTIME_PORT}/healthz" > "${HEALTH}"
 
 step "The runtime mounted every domain and every tool"
-uv run python - "${HEALTH}" <<'PY' && pass "7 domains, 27 tools, none unreachable" || fail "tool inventory is wrong"
+uv run python - "${HEALTH}" <<'PY' && pass "7 domains, 28 tools, none unreachable" || fail "tool inventory is wrong"
 import json, sys
 h = json.load(open(sys.argv[1]))
 assert len(h["mcp_servers_connected"]) == 7, h["mcp_servers_connected"]
 assert not h["mcp_servers_unreachable"], h["mcp_servers_unreachable"]
-assert len(h["tools"]) == 27, len(h["tools"])
+assert len(h["tools"]) == 28, len(h["tools"])
 for w in ("propose_change", "propose_xr", "propose_exception", "scaffold"):
     assert w in h["tools"], w
 PY
@@ -131,15 +136,24 @@ step "Grounding works with no key and no database"
 # not papering over a flake: the readiness probe is deliberately not gated on
 # the index, because a runtime that can answer without grounding should start
 # serving rather than stay down. So wait for it, with a bound.
-for _ in $(seq 1 40); do
+# ...and then the FULL index: the documentation alone is published within a
+# second so the runtime answers at once, and the manifests, environments and
+# CLI follow a few seconds later. Reading the count before they land is how
+# this check once reported 1,187 chunks while the log showed 4,000 arriving.
+for _ in $(seq 1 180); do
   curl -fsS "http://127.0.0.1:${RUNTIME_PORT}/healthz" > "${HEALTH}"
-  grep -q '"rag": *"[^"]*lexical' "${HEALTH}" && break
+  n=$(grep -o '([0-9]* chunks)' "${HEALTH}" | grep -o '[0-9]*' || echo 0)
+  [[ "${n:-0}" -gt 3500 ]] && break
   sleep 0.5
 done
-uv run python - "${HEALTH}" <<'PY' && pass "lexical retrieval is live" || fail "no grounding available"
-import json, sys
+uv run python - "${HEALTH}" <<'PY' && pass "lexical retrieval is live over the whole platform" || fail "no grounding available"
+import json, re, sys
 mode = json.load(open(sys.argv[1]))["rag"]
 assert "lexical" in mode, mode
+# Docs alone are ~1,200 chunks. Manifests, environments and the CLI take the
+# index past 3,500 — if it is not, a source is silently contributing nothing.
+chunks = int((re.search(r"\((\d+) chunks\)", mode) or [0, 0])[1])
+assert chunks > 3500, f"only {chunks} chunks indexed: {mode}"
 print(f"      {mode}")
 PY
 
@@ -205,7 +219,7 @@ AGENTIC_PORT=$((RUNTIME_PORT + 6))
 uv run python hack/stub-llm.py "${STUB_PORT}" >"${WORK}/stub.log" 2>&1 &
 echo $! >> "${WORK}/pids"
 
-ADHAR_AI_DOCS_PATH="${DOCS}" \
+ADHAR_AI_DOCS_PATH="${DOCS}" ADHAR_AI_REPO_PATH="${REPO}" \
 LLM_GATEWAY_URL="http://127.0.0.1:${STUB_PORT}" \
 ADHAR_AI_LLM_API_KEY="stub" \
   uv run adhar-ai runtime --config "${WORK}/config.yaml" --listen=":${AGENTIC_PORT}" \
@@ -291,7 +305,7 @@ assert answer["agent"] == "cost", answer["agent"]
 declared = set(roster["cost"]["tools"])
 used = {c["tool"] for c in answer.get("tool_calls", [])}
 assert used <= declared, f"called {used - declared}, which it never declared"
-print(f"      cost declares {len(declared)} tools; the whole surface is 27")
+print(f"      cost declares {len(declared)} tools; the whole surface is 28")
 CHECK
 
 step "A read-only agent stays read-only"

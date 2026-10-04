@@ -77,6 +77,11 @@ class KnowledgeBase:
     #: search: "what breaks if X" is a reachability query, not a similarity one.
     graph: KnowledgeGraph | None = None
     graph_sources: list[Any] = field(default_factory=list)
+    #: Attached by the runtime once a gateway exists; see `rag/retrieval.py`.
+    reranker: Any = None
+    rewriter: Any = None
+    #: Candidates fetched before the rerank narrows them.
+    candidates: int = 24
     #: Last refresh per origin, for `/knowledge/stats`.
     last_refresh: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -93,20 +98,55 @@ class KnowledgeBase:
         toolbox: Any = None,
         findings: Any = None,
         embedder: Any = None,
+        environments_path: str = "",
+        cli_path: str = "",
+        gitea: Any = None,
     ) -> KnowledgeBase:
+        """Assemble the sources this runtime can read.
+
+        The platform's own repositories are read through a `Tree`: a local
+        checkout when one is present (a workstation), otherwise Gitea (the
+        cluster). The two cases produce the same documents, which is the point
+        — what the agent knows must not depend on where it happens to run.
+        """
+        from .extract import EnvironmentGraphSource, ManifestGraphSource
+        from .platform_sources import CliSource, EnvironmentSource, ManifestsSource
+        from .trees import tree_for
+
         store = KnowledgeStore(dsn, table=table)
         notes = NotesSource(dsn, table=notes_table) if dsn else None
         graph = KnowledgeGraph(dsn) if dsn else None
+
+        packages_tree = tree_for(packages_path, gitea, "packages")
+        environments_tree = tree_for(environments_path, gitea, "environments")
+        # The CLI source lives in the `adhar` repository itself, which is only
+        # in Gitea if the platform mirrors it (globals.GitOpsRepoSource).
+        cli_tree = tree_for(cli_path, gitea, "adhar")
+
+        manifests = ManifestsSource(packages_tree)
+        environments = EnvironmentSource(environments_tree)
+
         graph_sources: list[Any] = [ToolGraphSource()]
         if packages_path:
             graph_sources.append(PackageGraphSource(packages_path))
+        if packages_tree is not None:
+            graph_sources.append(ManifestGraphSource(manifests))
+        if environments_tree is not None:
+            graph_sources.append(EnvironmentGraphSource(environments))
         if toolbox is not None:
             graph_sources.extend([ArgoGraphSource(toolbox), WorkloadGraphSource(toolbox)])
+
         sources: list[Source] = [ToolsSource()]
         if docs_path:
             sources.append(DocsSource(docs_path))
         if packages_path:
             sources.append(PackagesSource(packages_path))
+        if packages_tree is not None:
+            sources.append(manifests)
+        if environments_tree is not None:
+            sources.append(environments)
+        if cli_tree is not None:
+            sources.append(CliSource(cli_tree))
         if toolbox is not None:
             sources.append(ClusterSource(toolbox))
         if findings is not None:
@@ -147,6 +187,7 @@ class KnowledgeBase:
     async def refresh(self, only: tuple[str, ...] = ()) -> list[IngestReport]:
         """Re-derive knowledge from every source. One failure costs one origin."""
         reports: list[IngestReport] = []
+        fetched: dict[str, list[Document]] = {}
         for source in self.sources:
             if only and source.origin not in only:
                 continue
@@ -159,6 +200,7 @@ class KnowledgeBase:
                 log.warning("knowledge source %s failed: %s", source.origin, exc)
                 reports.append(report)
                 continue
+            fetched[source.origin] = documents
 
             if self.store.ready and self.embedder is not None:
                 report = await self.store.ingest(source.origin, documents, self.embedder)
@@ -176,7 +218,7 @@ class KnowledgeBase:
             }
 
         await self._refresh_graph(only)
-        await self._rebuild_lexical(only)
+        await self._rebuild_lexical(only, fetched)
         return reports
 
     async def _refresh_graph(self, only: tuple[str, ...] = ()) -> None:
@@ -195,7 +237,9 @@ class KnowledgeBase:
                 report = await self.graph.replace_origin(source.origin, nodes, edges)
                 self.last_refresh[f"graph:{source.origin}"] = report
 
-    async def _rebuild_lexical(self, only: tuple[str, ...] = ()) -> None:
+    async def _rebuild_lexical(
+        self, only: tuple[str, ...] = (), fetched: dict[str, list[Document]] | None = None
+    ) -> None:
         """Keep the in-process BM25 index in step with the sources.
 
         It is built even when pgvector is healthy: it is what answers while a
@@ -216,6 +260,11 @@ class KnowledgeBase:
         for source in self.sources:
             if only and source.origin not in only:
                 continue
+            # The refresh just read this source; reading it again would double
+            # every Gitea round-trip for nothing.
+            if fetched is not None and source.origin in fetched:
+                documents.extend(fetched[source.origin])
+                continue
             try:
                 documents.extend(await source.documents())
             except Exception:  # noqa: BLE001 - already reported by refresh()
@@ -227,13 +276,50 @@ class KnowledgeBase:
     # -------------------------------------------------------------- search --
 
     async def search(self, query: str, k: int = 5, kinds: tuple[str, ...] = ()) -> list[Hit]:
-        if self.store.ready:
-            hits = await self.store.search(query, self.embedder, k=k, kinds=kinds)
-            if hits:
-                return hits
-        return self._lexical_hits(query, k)
+        """Retrieve, optionally widened by a rewrite and narrowed by a rerank.
 
-    def _lexical_hits(self, query: str, k: int) -> list[Hit]:
+        The order is deliberate. The rewrite runs FIRST so both phrasings
+        contribute candidates; the rerank runs LAST over the fused candidates
+        so it judges everything either phrasing found. Both are no-ops when
+        nothing is attached, which is every runtime without a gateway.
+        """
+        candidates = max(k, self.candidates if self.reranker is not None else k)
+
+        hits = await self._retrieve(query, candidates, kinds)
+        if self.rewriter is not None:
+            rewritten = await self.rewriter.rewrite(query)
+            if rewritten:
+                from .retrieval import fuse
+
+                hits = fuse(hits, await self._retrieve(rewritten, candidates, kinds), candidates)
+
+        if self.reranker is not None and len(hits) > k:
+            hits = await self.reranker.rerank(query, hits, k)
+        return hits[:k]
+
+    async def _retrieve(self, query: str, k: int, kinds: tuple[str, ...]) -> list[Hit]:
+        """Three voters when the database is up, one when it is not.
+
+        The in-process BM25 index used to be only the fallback. It is the
+        better lexical voter: it splits `adhar-console` into its parts and
+        stems `deployed` to `deploy`, which Postgres full-text does not for
+        identifiers — and measured over the platform's own questions it found
+        the environment and manifest pages the database ranking buried under
+        ADRs. So it votes alongside pgvector and full-text, by reciprocal rank,
+        rather than waiting for them to fail.
+        """
+        lexical = self._lexical_hits(query, k, kinds)
+        if self.store.ready:
+            stored = await self.store.search(query, self.embedder, k=k, kinds=kinds)
+            if stored and lexical:
+                from .retrieval import fuse
+
+                return fuse(stored, lexical, k)
+            if stored:
+                return stored
+        return lexical
+
+    def _lexical_hits(self, query: str, k: int, kinds: tuple[str, ...] = ()) -> list[Hit]:
         if self.lexical is None:
             return []
         return [
@@ -248,7 +334,7 @@ class KnowledgeBase:
                 retrieval="lexical (in-process)",
                 metadata=dict(chunk.metadata),
             )
-            for chunk, score in self.lexical.search(query, k)
+            for chunk, score in self.lexical.search(query, k, kinds)
         ]
 
     async def graph_context(self, query: str, limit: int = 2) -> list[str]:

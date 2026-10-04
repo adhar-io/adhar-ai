@@ -1,0 +1,102 @@
+name: release
+
+# A GitHub Release for every version tag. The images themselves are built,
+# signed and pushed by images.yml on the same tag; this workflow is the human
+# face of that: release notes, the tool contract the Go CLI is written against,
+# and the SBOM — so a reader of the Releases page sees what shipped without
+# pulling an image.
+#
+# It runs AFTER images.yml succeeds, so a release is never announced for images
+# that do not exist.
+
+on:
+  workflow_run:
+    workflows: [images]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Only for a tag build that succeeded.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      REGISTRY: ghcr.io
+      OWNER: adhar-io
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: The tag must name the version the code states
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          declared="$(grep -m1 '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
+          if [ "${declared}" != "${VERSION}" ]; then
+            echo "::error::tag ${TAG} but pyproject declares ${declared}; use hack/release.sh"
+            exit 1
+          fi
+          grep -q "release-${VERSION}-" README.md || {
+            echo "::error::README badge does not show ${VERSION}; use hack/release.sh"; exit 1; }
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Collect what shipped
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp contract/tools.json "dist/tools-${VERSION}.json"
+          IMG="${REGISTRY}/${OWNER}/adhar-ai-runtime:${VERSION}"
+          # The SBOM images.yml attested, downloaded from the image itself.
+          cosign download attestation "${IMG}" \
+            | jq -r '.payload' | base64 -d | jq '.predicate' > "dist/sbom-${VERSION}.spdx.json" \
+            || echo "::warning::no SBOM attestation found on ${IMG}"
+          # Digests, so the release page states exactly what to pin.
+          {
+            echo "## Images"
+            echo
+            echo '| Name | Tag | Digest |'
+            echo '|---|---|---|'
+            for n in adhar-ai-runtime adhar-ai-mcp-cluster adhar-ai-mcp-gitops adhar-ai-mcp-provision \
+                     adhar-ai-mcp-observability adhar-ai-mcp-security adhar-ai-mcp-cost adhar-ai-mcp-catalog; do
+              digest="$(cosign triangulate "${REGISTRY}/${OWNER}/${n}:${VERSION}" 2>/dev/null | sed -n 's/.*sha256-\([0-9a-f]*\).*/sha256:\1/p' || true)"
+              echo "| \`${n}\` | \`${VERSION}\` | \`${digest:-see registry}\` |"
+            done
+            echo
+            echo "All eight names are one build. Signed keyless (Sigstore) by this repository's workflow; verify with:"
+            echo
+            echo '```'
+            echo "cosign verify --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  ${REGISTRY}/${OWNER}/adhar-ai-runtime:${VERSION}"
+            echo '```'
+            echo
+            echo "## Deploying"
+            echo
+            echo 'The platform tracks `:latest` with `imagePullPolicy: Always`, so no manifest changes. Roll the pods to pick this up:'
+            echo
+            echo '```'
+            echo 'kubectl rollout restart deployment -n adhar-system -l adhar.io/origin=adhar-ai'
+            echo '```'
+            echo
+            echo 'Then `GET /healthz` on the runtime reports `version` and the commit `revision` it is running.'
+          } > dist/footer.md
+
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: adhar-ai ${{ env.TAG }}
+          generate_release_notes: true
+          body_path: dist/footer.md
+          files: |
+            dist/tools-${{ env.VERSION }}.json
+            dist/sbom-${{ env.VERSION }}.spdx.json

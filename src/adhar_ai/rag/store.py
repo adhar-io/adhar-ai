@@ -192,7 +192,10 @@ class Hit:
     metadata: dict[str, Any]
 
     def as_grounding(self) -> str:
-        return f"### {self.source} ({self.kind}, {self.retrieval})\n\n{self.text}"
+        """The block the model reads: source and kind. `retrieval` stays on the
+        hit for `/knowledge/search` and the UI, where it is diagnostics rather
+        than noise a model repeats back as "according to the vector search"."""
+        return f"### {self.source} ({self.kind})\n\n{self.text}"
 
 
 def embedder_name(embedder: Any) -> str:

@@ -184,7 +184,7 @@ async def test_grounding_reaches_the_model() -> None:
     await run(model, EvalToolbox({}), session_for(scenario), scenario.prompt)
 
     system = model.requests[0]["messages"][0].content
-    assert "Grounding" in system
+    assert "Reference material" in system
     assert "0024-agentic-ai-platform" in system
 
 

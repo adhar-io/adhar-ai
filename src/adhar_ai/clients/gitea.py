@@ -95,6 +95,49 @@ class GiteaClient:
         payload = resp.json()
         return list(payload) if isinstance(payload, list) else [payload]
 
+    async def get_tree(
+        self, repo: str, ref: str = "main", *, recursive: bool = True
+    ) -> list[dict[str, Any]]:
+        """Every entry in the repository at `ref`, in one logical call.
+
+        Gitea pages the recursive tree at 1,000 entries and marks the response
+        `truncated` rather than failing, so a repository the size of
+        `packages` (1,227 entries) would silently lose its last two hundred
+        files to a single-page read. This follows the pages until the tree is
+        complete.
+        """
+        sha = await self.get_branch_sha(repo, ref) if len(ref) != 40 else ref
+        entries: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = await self._request(
+                "GET",
+                f"/repos/{self.cfg.org}/{repo}/git/trees/{sha}",
+                params={
+                    "recursive": "true" if recursive else "false",
+                    "per_page": 1000,
+                    "page": page,
+                },
+            )
+            payload = resp.json()
+            batch = list(payload.get("tree") or [])
+            entries.extend(batch)
+            total = int(payload.get("total_count") or 0)
+            if not batch or not payload.get("truncated") or len(entries) >= total:
+                break
+            page += 1
+        return entries
+
+    async def get_raw(self, repo: str, path: str, ref: str = "main") -> str:
+        """File contents by path, without the base64 round-trip of `contents`."""
+        resp = await self._http().get(
+            f"{self.api}/repos/{self.cfg.org}/{repo}/raw/{path}",
+            params={"ref": ref},
+            headers={"Accept": "*/*"},
+        )
+        resp.raise_for_status()
+        return resp.text
+
     async def get_branch_sha(self, repo: str, branch: str = "main") -> str:
         resp = await self._request("GET", f"/repos/{self.cfg.org}/{repo}/branches/{branch}")
         return str(resp.json()["commit"]["id"])

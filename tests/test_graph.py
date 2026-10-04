@@ -303,3 +303,175 @@ async def test_re_ingesting_the_same_nodes_does_not_duplicate_them(graph):
     first = await graph.stats()
     await graph.replace_origin("packages", nodes, edges)
     assert (await graph.stats())["nodes"] == first["nodes"]
+
+
+# ---------------------------------------------- the manifest graph, live --
+
+
+MINI_PLATFORM = {
+    "security/keycloak/manifests/install.yaml": """\
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: keycloak, namespace: adhar-system}
+spec:
+  template:
+    metadata: {labels: {app: keycloak}}
+    spec:
+      containers:
+        - name: kc
+          image: quay.io/keycloak/keycloak:26.0
+          env:
+            - name: KC_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: keycloak-db-app, key: password}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: keycloak, namespace: adhar-system}
+spec: {selector: {app: keycloak}, ports: [{port: 8080}]}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: keycloak, namespace: adhar-system}
+spec:
+  hostnames: [keycloak.adhar.localtest.me]
+  rules: [{backendRefs: [{name: keycloak, port: 8080}]}]
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata: {name: keycloak-db, namespace: adhar-system}
+spec: {instances: 1}
+""",
+    "ai/adhar-ai/manifests/llm.yaml": """\
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: {name: adhar-ai-llm, namespace: adhar-system}
+spec: {target: {name: adhar-ai-llm}, secretStoreRef: {name: vault, kind: ClusterSecretStore}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: adhar-ai-runtime, namespace: adhar-system}
+spec:
+  template:
+    metadata: {labels: {app: runtime}}
+    spec:
+      containers:
+        - name: runtime
+          image: ghcr.io/adhar-io/adhar-ai-runtime:latest
+          envFrom: [{secretRef: {name: adhar-ai-llm}}]
+""",
+}
+
+
+class _MemoryTree:
+    label = "memory"
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self._files = files
+
+    async def files(self, suffixes=(), prefix=""):
+        from adhar_ai.rag.trees import TreeFile
+
+        return [TreeFile(path=p, size=len(t)) for p, t in sorted(self._files.items())]
+
+    async def read(self, path):
+        return self._files[path]
+
+    async def read_many(self, paths):
+        return {p: self._files[p] for p in paths if p in self._files}
+
+
+@pytest.mark.slow
+@needs_db
+async def test_the_manifest_graph_answers_what_breaks_if_the_database_goes(graph):
+    """The question the whole graph exists for, now from declared config.
+
+    Keycloak binds `keycloak-db-app`, which is the CNPG app secret of
+    `keycloak-db`; the route reaches the service which selects the workload.
+    A database outage therefore reaches the hostname.
+    """
+    from adhar_ai.rag.extract import ManifestGraphSource
+    from adhar_ai.rag.platform_sources import ManifestsSource
+
+    source = ManifestsSource(_MemoryTree(MINI_PLATFORM))
+    await source.load()
+    nodes, edges = await ManifestGraphSource(source).extract()
+    await graph.replace_origin("manifests", nodes, edges)
+
+    kinds = {n.kind for n in nodes}
+    assert {"Package", "Workload", "Service", "Route", "Hostname", "Database", "Secret"} <= kinds
+
+    db = node_id("Database", "keycloak-db", "adhar-system")
+    affected = {f"{d.node.kind}:{d.node.name}" for d in await graph.dependents(db, depth=4)}
+    assert "Workload:keycloak" in affected, "the workload binding the db secret"
+    assert "Service:keycloak" in affected, "the service routing to that workload"
+    assert "Route:keycloak" in affected, "the route to that service"
+    # The unrelated package is not in the blast radius.
+    assert "Workload:adhar-ai-runtime" not in affected
+
+
+@pytest.mark.slow
+@needs_db
+async def test_an_external_secret_outage_reaches_the_workloads_that_read_it(graph):
+    """The edge is stored in DEPENDENCY direction (Secret requires
+    ExternalSecret), or this walk finds nothing."""
+    from adhar_ai.rag.extract import ManifestGraphSource
+    from adhar_ai.rag.platform_sources import ManifestsSource
+
+    source = ManifestsSource(_MemoryTree(MINI_PLATFORM))
+    await source.load()
+    nodes, edges = await ManifestGraphSource(source).extract()
+    await graph.replace_origin("manifests", nodes, edges)
+
+    es = node_id("ExternalSecret", "adhar-ai-llm", "adhar-system")
+    affected = {f"{d.node.kind}:{d.node.name}" for d in await graph.dependents(es, depth=3)}
+    assert "Secret:adhar-ai-llm" in affected
+    assert "Workload:adhar-ai-runtime" in affected
+    assert "Workload:keycloak" not in affected
+
+
+@pytest.mark.slow
+@needs_db
+async def test_a_hostname_resolves_to_what_serves_it(graph):
+    from adhar_ai.rag.extract import ManifestGraphSource
+    from adhar_ai.rag.platform_sources import ManifestsSource
+
+    source = ManifestsSource(_MemoryTree(MINI_PLATFORM))
+    await source.load()
+    nodes, edges = await ManifestGraphSource(source).extract()
+    await graph.replace_origin("manifests", nodes, edges)
+
+    resolved = await graph.resolve(["keycloak.adhar.localtest.me"])
+    assert [n.kind for n in resolved] == ["Hostname"]
+    nearby = await graph.neighbourhood(resolved[0].id, depth=3)
+    near = {f"{n.node.kind}:{n.node.name}" for n in nearby}
+    assert {"Route:keycloak", "Service:keycloak", "Workload:keycloak"} <= near
+
+
+@pytest.mark.slow
+@needs_db
+async def test_environments_enable_packages_in_the_graph(graph):
+    from adhar_ai.rag.extract import EnvironmentGraphSource
+    from adhar_ai.rag.platform_sources import EnvironmentSource
+
+    tree = _MemoryTree(
+        {
+            "local/config.yaml": "environment: local\ntype: nonprod\npackages:\n"
+            "  - {name: keycloak, enabled: 'true', category: security}\n"
+            "  - {name: falco, enabled: 'false', category: security}\n",
+            "production/config.yaml": "environment: prod\ntype: prod\npackages:\n"
+            "  - {name: falco, enabled: 'true', category: security}\n",
+        }
+    )
+    source = EnvironmentSource(tree)
+    await source.load()
+    nodes, edges = await EnvironmentGraphSource(source).extract()
+    await graph.replace_origin("environments", nodes, edges)
+
+    relations = {(e.src, e.relation, e.dst) for e in edges}
+    assert (node_id("Environment", "local"), "enables", node_id("Package", "keycloak")) in relations
+    assert (node_id("Environment", "local"), "disables", node_id("Package", "falco")) in relations
+    prod = node_id("Environment", "production")
+    assert (prod, "enables", node_id("Package", "falco")) in relations
+
+    near = {n.node.name for n in await graph.neighbourhood(node_id("Package", "falco"), depth=1)}
+    assert near == {"local", "production"}

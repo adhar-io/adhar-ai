@@ -87,7 +87,7 @@ DEFAULT_CHORES: tuple[ChoreSpec, ...] = (
             "report the secret, the issuer and the days remaining. If a renewal is "
             "configured but not progressing, say what is blocking it."
         ),
-        tools=("list_pods", "describe", "get_events", "findings", "promql"),
+        tools=("list_resources", "describe", "get_events", "findings", "promql"),
         agent="security",
         interval=86400.0,
         dedupe_hint="certificate",
@@ -114,7 +114,7 @@ DEFAULT_CHORES: tuple[ChoreSpec, ...] = (
             "mounts. Report each with the evidence that it is unreferenced. Be "
             "conservative — a resource used by something you cannot see is not orphaned."
         ),
-        tools=("list_pods", "describe", "resource_health"),
+        tools=("list_pods", "describe", "resource_health", "list_resources"),
         agent="platform",
         interval=604800.0,
         dedupe_hint="orphan",

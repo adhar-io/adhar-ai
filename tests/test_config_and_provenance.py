@@ -256,6 +256,13 @@ def test_the_package_version_matches_pyproject():
     declared = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
     assert adhar_ai.__version__ == declared
 
+    # The README is part of the release: its badge is the version a reader
+    # sees first, and `hack/release.sh` rewrites it in the same commit. A
+    # README saying one number while /healthz says another is the failure
+    # this line exists to make impossible.
+    readme = (root / "README.md").read_text()
+    assert f"badge/release-{declared}-" in readme, "README release badge does not match pyproject"
+
 
 def test_build_info_is_honest_when_nothing_stamped_it(monkeypatch):
     """A local run has no revision. Inventing one would be worse than saying so."""

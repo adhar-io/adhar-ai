@@ -624,3 +624,92 @@ async def test_an_unset_gateway_url_is_an_explicit_failure():
     client = GatewayClient("")
     with pytest.raises(RuntimeError, match="LLM_GATEWAY_URL"):
         await client.chat([], None, tenant="t")
+
+
+def asyncio_run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+# ---------------------------------------------------------- answer shape ----
+#
+# What the model is told about HOW to answer, and what it is handed to answer
+# from. These are the two things that made answers read like reports: a prompt
+# with constraints and no contract, and tool results pasted in as raw JSON.
+
+
+def test_the_system_prompt_carries_an_answer_contract():
+    from adhar_ai.runtime.loop import SYSTEM_PROMPT
+
+    # The prompt is wrapped at 90 columns; compare on words, not line breaks.
+    prompt = " ".join(SYSTEM_PROMPT.lower().split())
+    for phrase in (
+        "lead with the answer",
+        "plain language",
+        "never reproduce tool output",
+        "summarise",
+        "cite by name, not by mechanism",
+        "build on what was already said",
+    ):
+        assert phrase in prompt, f"the answer contract lost: {phrase!r}"
+    # The constraints that were always there must still be there.
+    for phrase in ("never invent", "only write path", "untrusted data"):
+        assert phrase in prompt, f"a safety constraint lost: {phrase!r}"
+
+
+def test_the_model_never_sees_how_a_block_was_retrieved():
+    """`### source (doc, lexical (in-process)+rerank)` taught the model to say
+    "according to the reranked chunk". The mechanism stays on the hit for the
+    UI; the model gets the source and its kind."""
+    from adhar_ai.rag.store import Hit
+
+    hit = Hit(
+        chunk_id=1, doc_id="d", source="ARCHITECTURE.md#AI layer", kind="doc", origin="docs",
+        text="body", score=1.0, retrieval="vector+lexical+rerank", metadata={},
+    )
+    block = hit.as_grounding()
+    assert block.startswith("### ARCHITECTURE.md#AI layer (doc)\n")
+    assert "rerank" not in block and "vector" not in block
+    assert hit.retrieval == "vector+lexical+rerank", "diagnostics are kept where they belong"
+
+
+def test_tool_output_reaches_the_model_bounded_and_annotated():
+    from adhar_ai.runtime.loop import (
+        TOOL_LIST_ITEMS,
+        TOOL_OUTPUT_CHARS,
+        compact_tool_output,
+    )
+
+    # A small result is passed through intact.
+    small = {"ok": True, "pods": [1, 2]}
+    assert json.loads(compact_tool_output(small)) == small
+
+    # A long list is cut to its first items PLUS a count, so the model can say
+    # "300 pods" rather than reading 300 records or, worse, counting 25.
+    pods = [{"name": f"pod-{i}", "phase": "Running"} for i in range(300)]
+    rendered = json.loads(compact_tool_output({"count": 300, "pods": pods}))
+    assert len(rendered["pods"]) == TOOL_LIST_ITEMS + 1
+    assert "275 more item(s) not shown (300 total)" in rendered["pods"][-1]
+
+    # A long string is cut with a marker rather than silently.
+    rendered = json.loads(compact_tool_output({"logs": "x" * 5000}))
+    assert rendered["logs"].endswith("[3500 more characters]")
+
+    # The whole thing is capped once, at the end, with a note — never mid-record
+    # with no sign anything is missing, which is what `[:20000]` did.
+    huge = {f"key{i}": "v" * 1000 for i in range(40)}
+    text = compact_tool_output(huge)
+    assert len(text) <= TOOL_OUTPUT_CHARS + 80
+    assert "truncated;" in text and "characters in full" in text
+
+
+def test_the_reference_section_tells_the_model_how_to_use_it():
+    """The header used to say "cite by source", which read as "quote it"."""
+    gateway = FakeGateway([_answer("fine")])
+    session = Session(grounding=["### ADR 0024 (adr)\n\nWrites are pull requests."])
+    asyncio_run(run(gateway, FakeToolbox(), session, "why PRs?"))
+    system = gateway.requests[0]["messages"][0].content
+    assert "## Reference material" in system
+    assert "cite it by its name" in system and "never quote it at length" in system
+    assert "## Grounding" not in system

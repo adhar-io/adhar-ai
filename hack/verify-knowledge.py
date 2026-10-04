@@ -36,9 +36,9 @@ from collections import Counter
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"))
 
+from adhar_ai.rag import KnowledgeBase  # noqa: E402
 from adhar_ai.rag.extract import candidate_terms  # noqa: E402
 from adhar_ai.rag.graph import as_grounding  # noqa: E402
-from adhar_ai.rag import KnowledgeBase  # noqa: E402
 from adhar_ai.rag.lexical import tokenize  # noqa: E402
 
 DIM = 1536
@@ -93,6 +93,11 @@ async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--docs", required=True)
     parser.add_argument("--packages", default="")
+    parser.add_argument(
+        "--repo",
+        default="",
+        help="a checkout of the adhar repository; supplies environments and the CLI source",
+    )
     parser.add_argument("--dsn", default=os.environ.get("ADHAR_AI_RAG_DSN", ""))
     args = parser.parse_args()
 
@@ -101,8 +106,14 @@ async def main() -> int:
         return 2
 
     embedder = HashedTfIdf()
+    repo = args.repo.rstrip("/")
     kb = KnowledgeBase.build(
-        dsn=args.dsn, docs_path=args.docs, packages_path=args.packages, embedder=embedder
+        dsn=args.dsn,
+        docs_path=args.docs,
+        packages_path=args.packages,
+        environments_path=f"{repo}/platform/stack/environments" if repo else "",
+        cli_path=repo,
+        embedder=embedder,
     )
 
     step("1. Schema on a real pgvector")
@@ -230,7 +241,8 @@ async def main() -> int:
     )
     await kb.store.ingest("verify", [temp], embedder)
     hits = await kb.search("This document exists only to be removed", k=5)
-    check("the temporary document is retrievable", any(h.doc_id == "verify:temporary" for h in hits))
+    found = any(h.doc_id == "verify:temporary" for h in hits)
+    check("the temporary document is retrievable", found)
     removed = await kb.store.ingest("verify", [], embedder)
     check(
         "re-ingesting the origin without it removes it",
@@ -249,7 +261,8 @@ async def main() -> int:
             f"chunks={origin['chunks']:5d} docs={origin['documents']:4d}{RESET}"
         )
     check("the base holds the whole platform", stats["chunks"] > 1000)
-    check("more than one kind of knowledge is present", len({o["kind"] for o in stats["origins"]}) >= 3)
+    kinds = {o["kind"] for o in stats["origins"]}
+    check("more than one kind of knowledge is present", len(kinds) >= 3)
 
     step("10. The knowledge graph over the same database")
     graph = kb.graph
@@ -260,7 +273,8 @@ async def main() -> int:
         print(f"        {DIM_}nodes={gstats['nodes']} edges={gstats['edges']}{RESET}")
         for row in gstats["byKind"]:
             print(
-                f"        {DIM_}{row['origin']:10s} {row['kind']:12s} count={row['count']:4d}{RESET}"
+                f"        {DIM_}{row['origin']:10s} {row['kind']:12s} "
+                f"count={row['count']:4d}{RESET}"
             )
         for row in gstats["byRelation"]:
             print(f"        {DIM_}{'':10s} -{row['relation']:11s} count={row['count']:4d}{RESET}")
@@ -310,6 +324,21 @@ async def main() -> int:
             after["nodes"] >= before["nodes"] - 5,
             f"{before['nodes']} -> {after['nodes']} nodes",
         )
+
+    step("11. The graded question set: does retrieval hand the model the right source?")
+    from adhar_ai.rag.benchmark import grade, summary
+
+    results = await grade(kb, k=6)
+    verdict = summary(results)
+    for result in results:
+        mark = "ok  " if result.passed else "FAIL"
+        print(f"        {DIM_}{mark} {result.question.ask[:62]:62s} -> "
+              f"{(result.matched or ', '.join(result.sources[:2]))[:60]}{RESET}")
+    check(
+        "every graded question retrieves an expected source",
+        verdict["passed"] == verdict["total"],
+        f"{verdict['passed']}/{verdict['total']}",
+    )
 
     print()
     if FAILURES:

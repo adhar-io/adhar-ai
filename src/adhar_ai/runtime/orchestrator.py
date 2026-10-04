@@ -227,7 +227,7 @@ class Orchestrator:
                 # documentation. An agent given the whole corpus is a
                 # generalist wearing a label.
                 grounding, chunk_ids = await self.knowledge.grounding_with_ids(
-                    task.prompt, k=5, kinds=agent.knowledge_kinds
+                    task.prompt, k=self.config.rag_k, kinds=agent.knowledge_kinds
                 )
             except Exception as exc:  # noqa: BLE001
                 log.debug("grounding unavailable for task %s: %s", task.id, exc)

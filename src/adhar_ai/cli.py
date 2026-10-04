@@ -17,7 +17,7 @@ import os
 import sys
 from collections.abc import Sequence
 
-from .config import DOMAINS, LLMConfig, MCPConfig, RuntimeEnv, env, parse_listen
+from .config import DOMAINS, LLMConfig, MCPConfig, RuntimeEnv, parse_listen
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
@@ -160,10 +160,15 @@ def _reindex(
         return 2
 
     async def go() -> int:
+        from .runtime.app import platform_repositories
+
         knowledge = KnowledgeBase.build(
             dsn=target_dsn,
             docs_path=docs or environment.docs_path,
-            packages_path=packages or env("ADHAR_AI_PACKAGES_PATH", default=""),
+            packages_path=packages or environment.packages_path,
+            environments_path=environment.environments_path,
+            cli_path=environment.cli_path,
+            gitea=platform_repositories(),
             table=cfg.rag_table,
             embedder=await load_embeddings(environment.llm_gateway_url),
         )

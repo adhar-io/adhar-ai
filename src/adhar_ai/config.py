@@ -361,9 +361,25 @@ class RuntimeEnv:
     oidc_client_id: str = "adhar-ai"
     rag_dsn: str = ""
     docs_path: str = ""
+    #: A checkout of the `adhar` repository. When set, the package, environment
+    #: and CLI paths below default to its subdirectories, which is how a
+    #: workstation runs. In the cluster it is empty and the same content is
+    #: read from Gitea (see `rag/trees.py`).
+    repo_path: str = ""
+    packages_path: str = ""
+    environments_path: str = ""
+    cli_path: str = ""
 
     @classmethod
     def from_env(cls) -> RuntimeEnv:
+        repo = env("ADHAR_AI_REPO_PATH", default="").rstrip("/")
+
+        def under(var: str, sub: str) -> str:
+            explicit = env(var, default="")
+            if explicit:
+                return explicit
+            return f"{repo}/{sub}" if repo else ""
+
         return cls(
             llm_gateway_url=env(
                 "LLM_GATEWAY_URL",
@@ -374,7 +390,13 @@ class RuntimeEnv:
             oidc_issuer_url=env("OIDC_ISSUER_URL"),
             oidc_client_id=env("OIDC_CLIENT_ID", default="adhar-ai"),
             rag_dsn=rag_dsn_from_env(),
-            docs_path=env("ADHAR_AI_DOCS_PATH", default="/etc/adhar-ai/docs"),
+            docs_path=env(
+                "ADHAR_AI_DOCS_PATH", default=f"{repo}/docs" if repo else "/etc/adhar-ai/docs"
+            ),
+            repo_path=repo,
+            packages_path=under("ADHAR_AI_PACKAGES_PATH", "platform/stack/packages"),
+            environments_path=under("ADHAR_AI_ENVIRONMENTS_PATH", "platform/stack/environments"),
+            cli_path=under("ADHAR_AI_CLI_PATH", ""),
         )
 
 

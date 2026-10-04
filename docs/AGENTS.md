@@ -94,8 +94,12 @@ and a closed list of colleagues it may hand work to.
 | `generalist` | everything else — routing always terminates here | `suggest` |
 
 Each agent also declares the **kinds of knowledge it should read** — the
-security agent grounds on ADRs, runbooks and incidents; the guide on
-documentation and packages. The topology from the knowledge graph is never
+security agent grounds on ADRs, runbooks, incidents, manifests and
+environments; the platform agent adds the CLI; the guide reads documentation,
+packages, the CLI and environments. The newer kinds — `manifest`,
+`environment`, `cli` — are what let an agent answer with the image a workload
+runs, the environment a package is enabled in, or the exact `adhar` command,
+rather than from a design document that predates all three. The topology from the knowledge graph is never
 narrowed: what a thing connects to is true regardless of who is asking.
 
 **The ceiling narrows and never widens.** A `read-only` agent stays read-only
@@ -323,7 +327,38 @@ in a way nobody reports, over and over, until people stop asking.
 
 ---
 
-## 8. The routes
+## 8. How an answer is shaped
+
+The roster decides *who* answers and the knowledge base decides *from what*.
+The system prompt decides *how*, and it says so explicitly:
+
+- **Lead with the answer.** The first sentence answers the question in the
+  asker's own terms. Everything after it is support.
+- **Evidence as a few short bullets**, each one fact and where it came from in
+  plain words: "the `app_status` tool shows checkout OutOfSync since 09:14".
+  Name the object, never paste it. Twelve pods become what the twelve have in
+  common.
+- **Then the next step**, if there is one: the command, the file, the PR, or
+  the single question that must be answered first.
+- **Short.** Well under 150 words unless it is a how-to carrying steps.
+- **Cite by name, not by mechanism.** "ADR 0024", never "the grounding" or
+  "the vector search". What the model is handed carries only a source and its
+  kind; how it was retrieved stays on the hit for the UI.
+- **Honest about inference.** "Likely" and "I could not confirm" when a fact
+  was reasoned rather than observed; one line naming what is missing when a
+  backend is not configured.
+- **Conversational.** Build on earlier turns rather than repeating them; ask
+  one clarifying question only when the answer genuinely depends on it.
+
+Two things make that contract fair to ask of the model. Tool results reach it
+**bounded and annotated** — long lists cut to their first items plus a count,
+long strings cut with a marker, the whole capped once at the end with a note —
+rather than as a raw JSON dump truncated mid-record. And the evaluation suite
+grades **shape as well as substance**: an answer that opens with a heading or a
+JSON blob, mentions retrieval mechanics, pastes data, or runs past its word
+budget fails the scenario.
+
+## 9. The routes
 
 | Route | What it does |
 |---|---|

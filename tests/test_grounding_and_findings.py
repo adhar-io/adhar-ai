@@ -123,7 +123,11 @@ async def test_grounding_blocks_carry_their_source_and_path(
     blocks = await knowledge_base(lexical).grounding("kubectl apply", k=1)
     assert blocks
     assert "0024-agentic-ai-platform.md" in blocks[0]
-    assert "lexical" in blocks[0]
+    # The source and its kind. NOT the retrieval mechanism: a model handed
+    # "(adr, lexical)" learned to say "according to the lexical search", which
+    # no reader wants. The mechanism stays on the hit for /knowledge/search.
+    assert "(adr)" in blocks[0]
+    assert "lexical" not in blocks[0]
 
 
 async def test_grounding_ids_are_empty_without_a_store(lexical: LexicalIndex) -> None:

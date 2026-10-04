@@ -21,6 +21,7 @@ the second one possible.
 4. [How it learns](#4-how-it-learns)
 5. [Degradation: what works without what](#5-degradation-what-works-without-what)
 6. [The HTTP surface](#6-the-http-surface)
+6b. [The graded question set](#6b-the-graded-question-set)
 7. [Operating it](#7-operating-it)
 8. [Design notes worth knowing](#8-design-notes-worth-knowing)
 
@@ -38,6 +39,9 @@ nothing else.
 | 📘 Documentation | `docs` | "why is it built this way", "how do I do X" |
 | 🧰 Tool inventory | `tools` | "what can you actually do for me" |
 | 📦 Package catalogue | `packages` | "what is installed, what does it depend on" |
+| 📜 Manifests | `manifests` | "which image does it run, which secret does it read, what is its URL, which database does it bind" |
+| 🌍 Environments | `environments` | "which packages are enabled in production, and where do they deploy" |
+| ⌨️ The `adhar` CLI | `cli` | "what command does that, and what are its flags" |
 | ☸️ Live cluster | `cluster` | "what is running right now, and is it healthy" |
 | 🔍 Operator findings | `findings` | "has the platform noticed this before" |
 | 📝 Human notes | `notes` | "what did we decide, and what did we learn" |
@@ -73,6 +77,31 @@ The weights are deliberately mild. They break ties between comparable matches
 rather than override relevance.
 
 ---
+
+### Where the platform's own files come from
+
+The manifests, environments, package contracts and CLI source are read through
+a **tree**: a checkout of the `adhar` repository on a workstation
+(`ADHAR_AI_REPO_PATH`), or **Gitea** inside the cluster (`GITEA_API_URL`), which
+holds the `packages` and `environments` repositories the platform is actually
+reconciled from, plus a read-only mirror of the `adhar` source for the docs and
+the CLI. The two produce the same documents, so what the agent knows does not
+depend on where it runs. Gitea is read anonymously — the runtime holds no Gitea
+credential; the pull-request path lives in the gitops MCP server, which does.
+
+Before this, the in-cluster runtime read documentation from an optional
+ConfigMap and nothing else. It knew the platform's rationale and none of its
+configuration: asked which database Keycloak used, it retrieved three unrelated
+package contracts.
+
+Manifests are not indexed as YAML. Each resource is **rendered as prose** — the
+image, the Secrets and ConfigMaps it reads, the database it binds, the hostname
+that reaches it, its sync wave — because an embedding of forty lines of
+structure says "Kubernetes" rather than "Keycloak binds `keycloak-db-app`".
+Each package also gets one overview page, and its README. Two rules are safety
+rules: **Secret values are never rendered**, only key names; and ConfigMap
+values are inlined only when they look like configuration and never for a key
+whose name suggests a credential.
 
 ## 2. How it stays current
 
@@ -125,6 +154,24 @@ rankings without needing their scores to be comparable, which they are not: a
 cosine distance and a `ts_rank_cd` share no scale. Only the order each retriever
 produced is used. The result is then adjusted by kind weight and feedback.
 
+**Three voters, not two, when the database is up.** The in-process BM25 index
+is always built, and used to be only the fallback. It is the better lexical
+voter: it splits `adhar-console` into its parts and stems `deployed` to
+`deploy`, which Postgres full-text does not for identifiers. Measured over the
+platform's own graded questions, adding it as a third voter moved the database
+path from 7 of 12 to 12 of 12. It votes by reciprocal rank alongside pgvector
+and full-text; the same chunk found by two voters takes one slot.
+
+**Rerank and rewrite** sit either side of retrieval when a gateway is
+configured (`rag.rerank`, `rag.rewrite` in the ConfigMap, both on by default).
+The rewrite restates the question once in platform vocabulary — "why is
+checkout down" becomes "checkout OutOfSync Degraded repo-server" — and both
+phrasings are retrieved and fused. The rerank reads the top `rag.candidates`
+(24) and orders them before `rag.k` (6) reach the model. Each costs one small
+completion; each **fails open**, returning the original order or the original
+query; neither runs without a gateway, so a keyless platform retrieves exactly
+as before.
+
 A hit reports which half found it, so you can see the fusion working:
 
 ```
@@ -152,7 +199,7 @@ answer needs is bounded, not a graph workload.
 | `packages` | every package in the platform stack | `depends_on` between them |
 | `argocd` | ArgoCD Applications and the packages they ship | `deploys` |
 | `workloads` | pods in the platform namespace, plus the components and teams that own them | `runs_in`, `owns` |
-| `tools` | the seven MCP domains and their 27 tools | `serves` |
+| `tools` | the seven MCP domains and their 28 tools | `serves` |
 
 Each source is refreshed independently and **replaces only its own origin**. A
 package refresh that wiped the workload nodes would empty the graph between
@@ -200,7 +247,7 @@ curl -sS localhost:8080/knowledge | jq .graph
 ```json
 { "status": "ready", "nodes": 127, "edges": 157,
   "byKind": [ {"origin": "packages", "kind": "Package", "count": 93},
-              {"origin": "tools",    "kind": "Tool",    "count": 27},
+              {"origin": "tools",    "kind": "Tool",    "count": 28},
               {"origin": "tools",    "kind": "Domain",  "count":  7} ],
   "byRelation": [ {"relation": "depends_on", "count": 130},
                   {"relation": "serves",     "count":  27} ] }
@@ -332,6 +379,31 @@ and packages. The graph blocks are never filtered — what a thing connects to i
 true regardless of who is asking.
 
 ---
+
+## 6b. The graded question set
+
+`adhar_ai.rag.benchmark` holds questions with the source a correct retrieval
+must surface — the seven that exposed the gap, and the rows added since. It
+grades **retrieval, not the model**: a question passes when an expected source
+is in the top results, which is deterministic and needs no key.
+
+It runs three ways: `tests/evals/test_retrieval_gate.py` over a checkout with
+the BM25 index (set `ADHAR_REPO_PATH`; skipped without one), step 11 of
+`hack/verify-knowledge.py` against a real pgvector, and by hand:
+
+```bash
+uv run python -c "
+import asyncio; from adhar_ai.rag import KnowledgeBase; from adhar_ai.rag.benchmark import grade, summary
+async def main():
+    kb = KnowledgeBase.build(dsn='', docs_path='../adhar/docs', packages_path='../adhar/platform/stack/packages',
+                             environments_path='../adhar/platform/stack/environments', cli_path='../adhar')
+    await kb.prepare(); await kb.refresh(); print(summary(await grade(kb)))
+asyncio.run(main())"
+```
+
+When an answer disappoints, the fix is a row here before it is a code change:
+the row states what should have been retrieved, and then the code change makes
+it so, and the row keeps it so.
 
 ## 7. Operating it
 

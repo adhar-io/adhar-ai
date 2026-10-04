@@ -17,6 +17,10 @@
       "access": "read"
     },
     {
+      "name": "list_resources",
+      "access": "read"
+    },
+    {
       "name": "resource_health",
       "access": "read"
     }

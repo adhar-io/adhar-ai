@@ -145,6 +145,18 @@ class RuntimeConfig:
     mcp_servers: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MCP_SERVERS))
     rag_enabled: bool = True
     rag_table: str = "kb_chunk"
+    #: Grounding blocks handed to the model per question.
+    rag_k: int = 6
+    #: Candidates retrieved before reranking narrows them to `rag_k`. Four
+    #: times k is enough for a rerank to change the answer; more is latency.
+    rag_candidates: int = 24
+    #: Rerank the candidates with the gateway model. One extra completion per
+    #: question; the single cheapest retrieval-quality gain there is.
+    rag_rerank: bool = True
+    #: Rewrite the question into platform vocabulary once before retrieving,
+    #: and fuse both result lists. "Why is checkout down" retrieves poorly;
+    #: "checkout OutOfSync Degraded repo-server" retrieves well.
+    rag_rewrite: bool = True
     #: Findings survive a restart in this table, on the same CNPG database the
     #: RAG index uses. No database configured means in-memory only.
     findings_table: str = "finding"
@@ -189,6 +201,10 @@ class RuntimeConfig:
             mcp_servers={**DEFAULT_MCP_SERVERS, **(data.get("mcpServers") or {})},
             rag_enabled=bool(rag.get("enabled", True)),
             rag_table=str(rag.get("table", "kb_chunk")),
+            rag_k=max(1, int(rag.get("k", 6))),
+            rag_candidates=max(1, int(rag.get("candidates", 24))),
+            rag_rerank=bool(rag.get("rerank", True)),
+            rag_rewrite=bool(rag.get("rewrite", True)),
             findings_table=str((data.get("findings") or {}).get("table", "finding")),
             agents=dict(data.get("agents") or {}),
             chores=dict(data.get("chores") or {}),

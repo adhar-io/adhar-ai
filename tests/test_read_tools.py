@@ -362,3 +362,88 @@ async def test_search_packages_joins_gitea_and_argocd(mcp_cfg, fake_kube):
         "sync_status": "Synced",
         "health_status": "Healthy",
     }
+
+
+async def test_list_resources_summarises_each_kind_by_what_matters(mcp_cfg, fake_kube):
+    """One generic lister, so the live inventory and the certificate-expiry
+    chore can see routes, databases and certificates without a tool apiece."""
+    fake_kube.custom["httproutes"] = [
+        {
+            "metadata": {"name": "console", "namespace": "adhar-system"},
+            "spec": {
+                "hostnames": ["console.adhar.localtest.me"],
+                "rules": [{"backendRefs": [{"name": "console", "port": 80}]}],
+            },
+            "status": {"parents": [{"conditions": [{"type": "Accepted", "status": "True"}]}]},
+        }
+    ]
+    fake_kube.custom["clusters"] = [
+        {
+            "metadata": {"name": "keycloak-db", "namespace": "adhar-system"},
+            "spec": {"instances": 1, "imageName": "ghcr.io/cloudnative-pg/postgresql:16"},
+            "status": {
+                "readyInstances": 1,
+                "currentPrimary": "keycloak-db-1",
+                "phase": "Cluster in healthy state",
+            },
+        }
+    ]
+    fake_kube.custom["certificates"] = [
+        {
+            "metadata": {"name": "wildcard", "namespace": "adhar-system"},
+            "spec": {
+                "dnsNames": ["*.adhar.localtest.me"],
+                "issuerRef": {"name": "selfsigned"},
+                "secretName": "wildcard-tls",
+            },
+            "status": {
+                "notAfter": "2027-01-01T00:00:00Z",
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }
+    ]
+    server = server_for("cluster", mcp_cfg)
+
+    routes = await call(
+        server,
+        "list_resources",
+        {"group": "gateway.networking.k8s.io", "version": "v1", "plural": "httproutes"},
+    )
+    assert routes["count"] == 1
+    assert routes["items"][0]["hostnames"] == ["console.adhar.localtest.me"]
+    assert routes["items"][0]["backends"] == ["console:80"]
+    assert routes["items"][0]["accepted"] is True
+
+    dbs = await call(
+        server,
+        "list_resources",
+        {"group": "postgresql.cnpg.io", "version": "v1", "plural": "clusters"},
+    )
+    assert dbs["items"][0]["primary"] == "keycloak-db-1"
+    assert dbs["items"][0]["readyInstances"] == 1
+
+    certs = await call(
+        server,
+        "list_resources",
+        {"group": "cert-manager.io", "version": "v1", "plural": "certificates"},
+    )
+    assert certs["items"][0]["notAfter"] == "2027-01-01T00:00:00Z"
+    assert certs["items"][0]["ready"] is True
+    assert certs["items"][0]["secret"] == "wildcard-tls"
+
+    # An unknown kind still answers, with its conditions and scalar status.
+    fake_kube.custom["widgets"] = [
+        {
+            "metadata": {"name": "w"},
+            "status": {
+                "phase": "Up",
+                "conditions": [{"type": "Ready", "status": "False"}],
+                "nested": {"x": 1},
+            },
+        }
+    ]
+    widgets = await call(
+        server, "list_resources", {"group": "x.io", "version": "v1", "plural": "widgets"}
+    )
+    assert widgets["items"][0]["ready"] is False
+    assert widgets["items"][0]["status"] == {"phase": "Up"}

@@ -54,8 +54,44 @@ B = 0.75  # length normalization
 
 
 def tokenize(text: str) -> list[str]:
-    """Lowercase word tokens, keeping `kube-system` and `app.kubernetes.io` whole."""
-    return [t for t in TOKEN_RE.findall(text.lower()) if t not in STOPWORDS and len(t) > 1]
+    """Lowercase word tokens, keeping `kube-system` and `app.kubernetes.io` whole —
+    AND their parts.
+
+    The whole token is what makes an exact identifier retrievable. The parts
+    are what make a question retrievable: people write "adhar console" and
+    "API key" where the manifests say `adhar-console` and `API_KEY`, and a
+    tokenizer that keeps only the compound never lets the two meet. The
+    compound still scores higher, because it is rarer.
+    """
+    out: list[str] = []
+    for token in TOKEN_RE.findall(text.lower()):
+        if token in STOPWORDS or len(token) <= 1:
+            continue
+        out.append(token)
+        parts = re.split(r"[-_.]", token) if ("-" in token or "_" in token or "." in token) else []
+        for part in parts:
+            if part and part not in STOPWORDS and len(part) > 1 and part != token:
+                out.append(part)
+        # A conservative stem, emitted ALONGSIDE the word: "deployed", "deploys"
+        # and "deploy" should meet, as they already do on the Postgres path,
+        # whose full-text index stems. Alongside rather than instead, so an
+        # exact word still outscores an inflection of it.
+        for word in [token, *parts]:
+            stem = _stem(word)
+            if stem != word:
+                out.append(stem)
+    return out
+
+
+def _stem(word: str) -> str:
+    """Strip the commonest English inflections. Deliberately timid: a stemmer
+    that turns `kubernetes` into `kubernet` makes every identifier fuzzy."""
+    if not word.isalpha() or len(word) < 5:
+        return word
+    for suffix in ("ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4 and not word.endswith("ss"):
+            return word[: -len(suffix)]
+    return word
 
 
 @dataclass(slots=True)
@@ -139,14 +175,24 @@ class LexicalIndex:
             return 0.0
         return max(0.0, math.log(1.0 + (n - df + 0.5) / (df + 0.5)))
 
-    def search(self, query: str, k: int = 5) -> list[tuple[Chunk, float]]:
-        """Top-k chunks by BM25, best first. Chunks scoring zero are dropped."""
+    def search(
+        self, query: str, k: int = 5, kinds: tuple[str, ...] = ()
+    ) -> list[tuple[Chunk, float]]:
+        """Top-k chunks by BM25, best first. Chunks scoring zero are dropped.
+
+        `kinds` narrows to those kinds, exactly as the pgvector path does. The
+        fallback used to ignore it, so an agent scoped to runbooks and
+        incidents read manifests the moment the database was unavailable —
+        the one time the scope was most likely to matter.
+        """
         terms = tokenize(query)
         if not terms or not self.docs:
             return []
         weights = {t: self._idf(t) for t in set(terms)}
         scored: list[tuple[Chunk, float]] = []
         for doc in self.docs:
+            if kinds and doc.chunk.kind not in kinds:
+                continue
             score = 0.0
             for term in set(terms):
                 tf = doc.terms.get(term, 0)

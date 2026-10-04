@@ -211,6 +211,182 @@ class WorkloadGraphSource:
         return list(nodes.values()), edges
 
 
+class ManifestGraphSource:
+    """What the manifests say connects to what.
+
+    The most detailed edges in the graph, and the ones that answer the
+    questions people actually ask: which workloads bind the Keycloak database,
+    what hostname reaches the console, which Secret an ExternalSecret writes.
+    Built from the same parse the `manifests` knowledge source did, so a
+    refresh reads the 550 files once.
+    """
+
+    origin = "manifests"
+
+    def __init__(self, source: Any) -> None:
+        #: A `ManifestsSource`, whose `resources` are populated after it runs.
+        self.source = source
+
+    async def extract(self) -> tuple[list[Node], list[Edge]]:
+        from .manifests import WORKLOAD_KINDS, references
+
+        resources = list(getattr(self.source, "resources", None) or [])
+        if not resources and hasattr(self.source, "load"):
+            resources = await self.source.load()
+        if not resources:
+            return [], []
+
+        nodes: dict[str, Node] = {}
+        edges: list[Edge] = []
+
+        def node(kind: str, name: str, namespace: str = "", **attributes: Any) -> str:
+            nid = node_id(kind, name, namespace)
+            if nid not in nodes:
+                nodes[nid] = Node(
+                    id=nid,
+                    kind=kind,
+                    name=name,
+                    namespace=namespace,
+                    origin=self.origin,
+                    attributes=attributes,
+                )
+            return nid
+
+        # Services by (namespace, selector) so a Service can be joined to the
+        # workload whose pod labels it selects.
+        services: list[tuple[str, dict[str, str], str]] = []
+        workloads: list[tuple[str, dict[str, str], str]] = []
+
+        for r in resources:
+            package_name = r.package.split("/")[-1]
+            pid = node("Package", package_name, category=r.package.split("/")[0])
+            refs = references(r)
+
+            if r.kind in WORKLOAD_KINDS:
+                wid = node(
+                    "Workload", r.name, r.namespace, resource_kind=r.kind, images=refs.images[:4]
+                )
+                edges.append(Edge(src=pid, dst=wid, relation="owns", origin=self.origin))
+                workloads.append((wid, refs.pod_labels, r.namespace))
+                for secret in refs.secrets:
+                    sid = node("Secret", secret, r.namespace)
+                    edges.append(Edge(src=wid, dst=sid, relation="binds", origin=self.origin))
+                for cm in refs.configmaps:
+                    cid = node("ConfigMap", cm, r.namespace)
+                    edges.append(Edge(src=wid, dst=cid, relation="binds", origin=self.origin))
+                for db in refs.databases:
+                    did = node("Database", db, r.namespace)
+                    edges.append(Edge(src=wid, dst=did, relation="depends_on", origin=self.origin))
+
+            elif r.kind == "Service":
+                sid = node("Service", r.name, r.namespace)
+                edges.append(Edge(src=pid, dst=sid, relation="owns", origin=self.origin))
+                services.append((sid, refs.selector, r.namespace))
+
+            elif r.kind in ("HTTPRoute", "GRPCRoute", "TLSRoute", "Ingress"):
+                rid = node("Route", r.name, r.namespace, resource_kind=r.kind)
+                edges.append(Edge(src=pid, dst=rid, relation="owns", origin=self.origin))
+                for host in refs.hostnames:
+                    hid = node("Hostname", host)
+                    edges.append(Edge(src=rid, dst=hid, relation="exposes", origin=self.origin))
+                for svc in refs.services:
+                    sid = node("Service", svc.split(":")[0], r.namespace)
+                    edges.append(Edge(src=rid, dst=sid, relation="routes_to", origin=self.origin))
+
+            elif r.kind == "Cluster" and "postgresql.cnpg.io" in r.api_version:
+                did = node(
+                    "Database",
+                    r.name,
+                    r.namespace,
+                    instances=r.spec.get("instances"),
+                    database=((r.spec.get("bootstrap") or {}).get("initdb") or {}).get("database"),
+                )
+                edges.append(Edge(src=pid, dst=did, relation="owns", origin=self.origin))
+
+            elif r.kind == "ExternalSecret" and refs.provides_secret:
+                # Edge in DEPENDENCY direction — the Secret cannot exist without
+                # the ExternalSecret — so a blast-radius walk from a broken
+                # ExternalSecret reaches the Secret and then every workload
+                # that binds it. "provides" read naturally and walked nowhere.
+                eid = node("ExternalSecret", r.name, r.namespace)
+                sid = node("Secret", refs.provides_secret, r.namespace)
+                edges.append(Edge(src=pid, dst=eid, relation="owns", origin=self.origin))
+                edges.append(Edge(src=sid, dst=eid, relation="requires", origin=self.origin))
+
+            elif r.kind == "ConfigMap":
+                cid = node("ConfigMap", r.name, r.namespace)
+                edges.append(Edge(src=pid, dst=cid, relation="owns", origin=self.origin))
+                for db in refs.databases:
+                    did = node("Database", db, r.namespace)
+                    edges.append(Edge(src=cid, dst=did, relation="depends_on", origin=self.origin))
+
+            elif r.kind == "Certificate" and refs.provides_secret:
+                cid = node("Certificate", r.name, r.namespace, hosts=refs.hostnames[:6])
+                sid = node("Secret", refs.provides_secret, r.namespace)
+                edges.append(Edge(src=pid, dst=cid, relation="owns", origin=self.origin))
+                edges.append(Edge(src=sid, dst=cid, relation="requires", origin=self.origin))
+
+        # A Service reaches the workloads whose pod labels satisfy its selector.
+        for sid, selector, ns in services:
+            if not selector:
+                continue
+            for wid, labels, wns in workloads:
+                if wns == ns and all(labels.get(k) == v for k, v in selector.items()):
+                    edges.append(Edge(src=sid, dst=wid, relation="routes_to", origin=self.origin))
+
+        return list(nodes.values()), edges
+
+
+class EnvironmentGraphSource:
+    """Which environment enables which package.
+
+    `Environment enables Package` is what turns "what breaks if cnpg goes
+    down" into "what breaks in PRODUCTION if cnpg goes down" — the question
+    somebody on call is actually asking.
+    """
+
+    origin = "environments"
+
+    def __init__(self, source: Any) -> None:
+        #: An `EnvironmentSource`, whose `environments` are populated after it runs.
+        self.source = source
+
+    async def extract(self) -> tuple[list[Node], list[Edge]]:
+        envs = dict(getattr(self.source, "environments", None) or {})
+        if not envs and hasattr(self.source, "load"):
+            envs = await self.source.load()
+        nodes: dict[str, Node] = {}
+        edges: list[Edge] = []
+        for name, data in sorted(envs.items()):
+            eid = node_id("Environment", name)
+            nodes[eid] = Node(
+                id=eid,
+                kind="Environment",
+                name=name,
+                origin=self.origin,
+                attributes={"type": data.get("type"), "alias": data.get("environment")},
+            )
+            for row in data.get("packages") or []:
+                if not isinstance(row, dict) or not row.get("name"):
+                    continue
+                enabled = str(row.get("enabled")).strip().lower() in {"true", "yes", "1", "on"}
+                pid = node_id("Package", str(row["name"]))
+                nodes.setdefault(
+                    pid,
+                    Node(id=pid, kind="Package", name=str(row["name"]), origin=self.origin),
+                )
+                edges.append(
+                    Edge(
+                        src=eid,
+                        dst=pid,
+                        relation="enables" if enabled else "disables",
+                        origin=self.origin,
+                        attributes={"namespace": row.get("namespace")},
+                    )
+                )
+        return list(nodes.values()), edges
+
+
 class ToolGraphSource:
     """The agent's own tools, and the domains that serve them.
 

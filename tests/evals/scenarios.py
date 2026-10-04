@@ -41,6 +41,9 @@ class Scenario:
     forbids_tools: tuple[str, ...] = ()
     #: Grounding blocks placed in front of the model.
     grounding: list[str] = field(default_factory=list)
+    #: Longest acceptable answer, in words. A diagnosis or a yes/no is short; a
+    #: how-to with steps and commands may run longer. Default is the short one.
+    word_budget: int = 220
     #: Substrings a grounded answer is expected to contain, case-insensitively.
     #: Kept to terms that come from tool output or grounding — never to phrasing.
     expects_terms: tuple[str, ...] = ()
@@ -127,7 +130,7 @@ GROUNDED_POLICY_QUESTION = Scenario(
     name="answer from the platform's own documentation",
     prompt="Can Adhar AI apply a manifest directly to the cluster?",
     grounding=[
-        "### adr/0024-agentic-ai-platform.md#Decision (adr, vector)\n\n"
+        "### adr/0024-agentic-ai-platform.md#Decision (adr)\n\n"
         "Every mutation is a Git change against Gitea. There is no tool that "
         "calls kubectl apply, argocd app set, or a cloud API directly with "
         "mutating scope."
@@ -241,4 +244,53 @@ def grade(scenario: Scenario, result: Any) -> Grade:
     )
 
     report.check("run did not error", result.kind != "error", result.error or "")
+
+    # ---- shape: the properties of an answer a person is glad to receive ----
+    # These grade HOW it was said, which the properties above do not. Each is
+    # a thing a user complained about: answers that opened with a heading or a
+    # JSON blob, that talked about "the grounding" and "the vector search",
+    # that pasted tool output, that ran long.
+    answer = (result.text or "").strip()
+    if answer and result.kind != "error":
+        first = answer.splitlines()[0].strip()
+        report.check(
+            "leads with a sentence, not a heading or data",
+            bool(first) and not first.startswith(("#", "{", "[", "```", "|", "- ", "* ")),
+            f"opened with {first[:60]!r}",
+        )
+        mechanics = [w for w in RETRIEVAL_MECHANICS if w in text]
+        report.check(
+            "cites by name, not by mechanism",
+            not mechanics,
+            f"mentions {mechanics}",
+        )
+        fenced = answer.count("```") // 2
+        json_like = answer.count('": ') >= 4 or answer.lstrip().startswith(("{", "["))
+        report.check(
+            "summarises rather than pasting data",
+            not json_like and fenced <= 2,
+            f"{fenced} fenced block(s); json-like={json_like}",
+        )
+        words = len(answer.split())
+        budget = scenario.word_budget
+        report.check(
+            f"stays under {budget} words",
+            words <= budget,
+            f"{words} words",
+        )
     return report
+
+
+#: Words that describe how an answer was assembled rather than what it says.
+#: Fine in an operator's diagnostics; in an answer they are noise, and a model
+#: that uses them is narrating its prompt rather than answering the question.
+RETRIEVAL_MECHANICS = (
+    "grounding",
+    "vector search",
+    "reranked",
+    "retrieved chunk",
+    "the context provided",
+    "based on the context",
+    "as an ai",
+    "according to the documents provided",
+)

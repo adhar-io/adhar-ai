@@ -74,6 +74,23 @@ KNOWLEDGE_REFRESH_SECONDS = env_int("ADHAR_AI_KNOWLEDGE_REFRESH_SECONDS", defaul
 #: Where the package contracts are mounted, if they are. Optional: without it
 #: the catalogue simply is not one of the knowledge sources.
 PACKAGES_PATH = env("ADHAR_AI_PACKAGES_PATH", default="")
+
+
+def platform_repositories() -> Any:
+    """A read-only Gitea client for the platform's own repositories, or `None`.
+
+    Built from `GITEA_API_URL` alone. No token: the knowledge sources only
+    read, the repositories are readable anonymously inside the cluster, and
+    the runtime should not hold a Gitea credential it has no use for — the PR
+    path lives in the gitops MCP server, which does.
+    """
+    from ..clients.gitea import GiteaClient
+    from ..config import GiteaConfig
+
+    cfg = GiteaConfig.from_env()
+    if not cfg.api_url:
+        return None
+    return GiteaClient(GiteaConfig(api_url=cfg.api_url, org=cfg.org))
 FINDINGS_KEPT = 200
 #: Agent runs one caller may START per window. Not a token budget — that is
 #: agentgateway's, per Keycloak group — but a cap on concurrent expensive work,
@@ -178,7 +195,13 @@ def create_app(
         app.state.knowledge = knowledge or KnowledgeBase.build(
             dsn=environment.rag_dsn,
             docs_path=environment.docs_path,
-            packages_path=PACKAGES_PATH,
+            packages_path=environment.packages_path or PACKAGES_PATH,
+            environments_path=environment.environments_path,
+            cli_path=environment.cli_path,
+            # In the cluster the platform's repositories are read from Gitea,
+            # anonymously: they are readable inside the cluster and this is a
+            # read. A checkout on disk wins where one exists.
+            gitea=platform_repositories(),
             table=config.rag_table,
             toolbox=app.state.toolbox,
             findings=None,  # wired below, once the finding store exists
@@ -897,12 +920,41 @@ async def _bootstrap_knowledge(
     if getattr(app.state, "orchestrator", None) is not None:
         app.state.orchestrator.knowledge = knowledge
 
+    # Rerank and rewrite through the gateway. Attached here rather than at
+    # build time because the gateway outlives any one knowledge base, and
+    # because a runtime with no gateway should retrieve exactly as before.
+    config_ = app.state.config
+    gateway_ = getattr(app.state, "gateway", None)
+    if gateway_ is not None and getattr(gateway_, "api_base", None):
+        from ..rag.retrieval import GatewayQueryRewriter, GatewayReranker
+
+        model = app.state.env.llm_model
+        if config_.rag_rerank:
+            knowledge.reranker = GatewayReranker(gateway_, model)
+        if config_.rag_rewrite:
+            knowledge.rewriter = GatewayQueryRewriter(gateway_, model)
+    knowledge.candidates = config_.rag_candidates
+
     lexical = await asyncio.to_thread(LexicalIndex.from_path, environment.docs_path)
     knowledge.lexical = lexical
     app.state.rag_status = knowledge.mode
 
     if not environment.rag_dsn:
+        # No database — but every source still has to run. This used to return
+        # here, leaving the docs-only index above as the whole knowledge base:
+        # a keyless runtime, and docker-compose, never indexed a manifest, an
+        # environment or a CLI command. `refresh()` with no store rebuilds the
+        # in-process index from ALL sources.
         log.info("no knowledge database configured; serving in-process lexical grounding")
+        try:
+            reports = await knowledge.refresh()
+            for report in reports:
+                log.info("knowledge indexed: %s", report.as_dict())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the docs-only index still serves
+            log.warning("knowledge sources failed; serving documentation only: %s", exc)
+        app.state.rag_status = knowledge.mode
         return
 
     try:

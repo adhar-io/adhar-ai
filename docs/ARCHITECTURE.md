@@ -150,7 +150,11 @@ checked and who calls the LLM.
   │       a `HANDOFF:` reply is FOLLOWED here, not shown to the asker        │
   │                                                                          │
   │  4. loop.run()  — plan / act / observe, <= maxSteps, <= maxToolCalls     │
-  │       offered ONLY this agent's tools, never all 27                      │
+  │       offered ONLY this agent's tools, never all 28                      │
+  │       tool results compacted: first 25 of a list + count, strings cut   │
+  │       with a marker, 12k cap with a note — never a raw dump cut mid-way  │
+  │       the prompt carries an ANSWER CONTRACT: lead with the answer, then  │
+  │       short cited evidence, then the next step; summarise, never paste   │
   │       │                                                                  │
   │       ├── LLM ──► POST $LLM_GATEWAY_URL/chat/completions                 │
   │       │      body NAMES a model; X-Adhar-Tenant + Authorization          │
@@ -472,7 +476,7 @@ Gateway API plus four CRDs.
 | Per-tool authorization over `jwt.groups` | the four operators and their triggers |
 | Prompt/response guardrails (credential masking, PII audit) | the staged-autonomy ladder and the `writePolicy` gate |
 | Per-group request and token budgets | grounding: chunking, embedding, retrieval |
-| OTel GenAI telemetry to Tempo, metrics to Grafana | the 27 tools and their backends |
+| OTel GenAI telemetry to Tempo, metrics to Grafana | the 28 tools and their backends |
 | MCP federation: seven servers, one `/mcp` endpoint | the single `open_pr` write path and its provenance |
 | Provider keys and model-name routing | structured audit events on every tool call |
 
@@ -758,7 +762,7 @@ detail: [OPERATIONS.md](OPERATIONS.md).
 | Self-hosted, one configurable key | a hosted SaaS copilot | conflicts with the 100%-open-source, no-phone-home principle and leaks platform state to a third party (ADR-0024 Context) |
 | A separate Python repository | an agent runtime inside the Go core | the MCP/agent/LLM ecosystem is Python; cramming it into Go would fight the ecosystem and bloat a core whose bootstrap boundary is deliberately narrow (ADR-0024 §1) |
 | One image, role selected by `args` | one image per role | eight Deployments from one build: no drift between roles, no per-role pipeline, and the manifests already pass the args |
-| Seven per-domain MCP servers | one server with all 27 tools | the domain is the unit of authorization — `GITEA_WRITE_ENABLED` and agentgateway's CEL rules both key on it |
+| Seven per-domain MCP servers | one server with all 28 tools | the domain is the unit of authorization — `GITEA_WRITE_ENABLED` and agentgateway's CEL rules both key on it |
 | agentgateway as the AI data plane | finish building `adhar-ai-llm-gateway` | a multi-quarter build of undifferentiated proxy features, then permanent maintenance of a security-critical component tracking a spec that revised twice in 2026 (ADR-0025) |
 | agentgateway over LiteLLM | LiteLLM as the LLM proxy | an LLM proxy only: no MCP federation, no A2A, no Gateway API integration, no tool-level authorization — half the problem and a second runtime (ADR-0025) |
 | agentgateway behind the Cilium edge | agentgateway as a second terminating edge | one TLS story, one host port, one place to look; nothing is lost because protocol awareness works identically one hop in (ADR-0025 §7) |
@@ -801,6 +805,6 @@ detail: [OPERATIONS.md](OPERATIONS.md).
 |---|---|
 | 🚀 [Getting Started](GETTING_STARTED.md) | From `uv sync` to a grounded answer to an opened pull request |
 | 🤖 [Agents & Automation](AGENTS.md) | The specialist roster, durable tasks, approvals, chores and journeys |
-| 🧰 [Tool Reference](TOOLS.md) | Every one of the 27 tools: arguments, backend, failure mode |
+| 🧰 [Tool Reference](TOOLS.md) | Every one of the 28 tools: arguments, backend, failure mode |
 | ⚙️ [Operations](OPERATIONS.md) | Every setting, the health surface, and how to diagnose it |
 | 🔐 [Security](SECURITY.md) | Threat model, the write path, authentication, autonomy, prompt injection |

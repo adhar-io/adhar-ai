@@ -56,6 +56,32 @@ def register(mcp: Any, cfg: MCPConfig) -> None:
         return {"pod": f"{namespace}/{name}", "container": container, "lines": text.splitlines()}
 
     @read
+    async def list_resources(
+        group: str, version: str, plural: str, namespace: str | None = None
+    ) -> dict[str, Any]:
+        """List custom resources of one kind, summarised: name, namespace, readiness,
+        and the facts that matter for that kind.
+
+        group/version/plural name the API, e.g.
+          gateway.networking.k8s.io / v1 / httproutes      -> hostnames and backends
+          postgresql.cnpg.io / v1 / clusters               -> instances, ready, primary
+          cert-manager.io / v1 / certificates              -> dnsNames, notAfter, ready
+          external-secrets.io / v1 / externalsecrets       -> target secret, synced
+          argoproj.io / v1alpha1 / applications            -> sync and health
+        namespace: restrict to one namespace (omit for cluster-wide).
+
+        Read-only. Full objects are not returned: a CRD list is kilobytes of
+        status per item, and this is for inventory rather than debugging —
+        `describe` is for one object in detail.
+        """
+        items = get_kube_client().list_custom(group, version, plural, namespace)
+        return {
+            "kind": plural,
+            "count": len(items),
+            "items": [_resource_summary(plural, item) for item in items],
+        }
+
+    @read
     async def resource_health(namespace: str | None = None) -> dict[str, Any]:
         """Deployment rollout health — desired vs ready replicas, plus the
         unhealthy pods behind any shortfall."""
@@ -78,3 +104,79 @@ def register(mcp: Any, cfg: MCPConfig) -> None:
             "pods_unhealthy": unhealthy,
             "healthy": not degraded and not unhealthy,
         }
+
+
+def _conditions(obj: dict[str, Any]) -> dict[str, str]:
+    """`{type: status}` for the conditions a human reads first."""
+    out: dict[str, str] = {}
+    for c in (obj.get("status") or {}).get("conditions") or []:
+        if isinstance(c, dict) and c.get("type"):
+            out[str(c["type"])] = str(c.get("status", ""))
+    return out
+
+
+def _resource_summary(plural: str, obj: dict[str, Any]) -> dict[str, Any]:
+    """The facts that matter for a kind, and nothing else.
+
+    Each branch is a few fields chosen because they answer the question
+    somebody listing that kind is asking: a route for its hostnames, a
+    certificate for its expiry, a database for whether it has a primary.
+    """
+    meta = obj.get("metadata") or {}
+    spec = obj.get("spec") or {}
+    status = obj.get("status") or {}
+    conditions = _conditions(obj)
+    summary: dict[str, Any] = {
+        "name": meta.get("name"),
+        "namespace": meta.get("namespace"),
+        "created": meta.get("creationTimestamp"),
+    }
+    ready = conditions.get("Ready")
+    if ready is not None:
+        summary["ready"] = ready == "True"
+
+    if plural in ("httproutes", "grpcroutes", "tlsroutes"):
+        summary["hostnames"] = list(spec.get("hostnames") or [])
+        summary["backends"] = [
+            f"{b.get('name')}:{b.get('port')}" if b.get("port") else str(b.get("name"))
+            for rule in spec.get("rules") or []
+            for b in (rule or {}).get("backendRefs") or []
+            if isinstance(b, dict)
+        ]
+        accepted = [
+            c.get("status")
+            for parent in status.get("parents") or []
+            for c in (parent or {}).get("conditions") or []
+            if isinstance(c, dict) and c.get("type") == "Accepted"
+        ]
+        if accepted:
+            summary["accepted"] = all(a == "True" for a in accepted)
+    elif plural == "clusters":  # CNPG
+        summary["instances"] = spec.get("instances")
+        summary["readyInstances"] = status.get("readyInstances")
+        summary["primary"] = status.get("currentPrimary")
+        summary["phase"] = status.get("phase")
+        summary["image"] = spec.get("imageName")
+    elif plural == "certificates":
+        summary["dnsNames"] = list(spec.get("dnsNames") or [])
+        summary["issuer"] = (spec.get("issuerRef") or {}).get("name")
+        summary["secret"] = spec.get("secretName")
+        summary["notAfter"] = status.get("notAfter")
+        summary["renewalTime"] = status.get("renewalTime")
+    elif plural == "externalsecrets":
+        summary["target"] = (spec.get("target") or {}).get("name") or meta.get("name")
+        summary["store"] = (spec.get("secretStoreRef") or {}).get("name")
+        summary["synced"] = conditions.get("Ready") == "True"
+        summary["refreshInterval"] = spec.get("refreshInterval")
+    elif plural == "applications":
+        summary["sync"] = (status.get("sync") or {}).get("status")
+        summary["health"] = (status.get("health") or {}).get("status")
+        summary["revision"] = (status.get("sync") or {}).get("revision", "")[:12]
+    else:
+        # Unknown kind: the conditions and the scalar status fields, which is
+        # what a generic `kubectl get` would show.
+        summary["conditions"] = conditions
+        summary["status"] = {
+            k: v for k, v in status.items() if not isinstance(v, (dict, list))
+        }
+    return summary

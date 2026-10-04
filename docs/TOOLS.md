@@ -1,12 +1,12 @@
 # 🧰 Tool Reference
 
-Adhar AI exposes **27 tools across 7 domains**. Each domain is its own MCP
+Adhar AI exposes **28 tools across 7 domains**. Each domain is its own MCP
 server — one container image, seven Deployments, differing only by
 `ADHAR_AI_MCP_DOMAIN`.
 
 | Domain | Server name | Read tools | Write tools |
 |---|---|---|---|
-| `cluster` | `adhar-cluster` | `list_pods`, `describe`, `get_events`, `logs`, `resource_health` | — |
+| `cluster` | `adhar-cluster` | `list_pods`, `describe`, `get_events`, `logs`, `resource_health`, `list_resources` | — |
 | `gitops` | `adhar-gitops` | `app_status`, `sync_status`, `app_diff` | `propose_change` |
 | `provision` | `adhar-provision` | `list_xrs`, `xr_status` | `propose_xr` |
 | `observability` | `adhar-observability` | `promql`, `logql`, `traceql`, `slo_burn`, `correlate` | — |
@@ -248,6 +248,49 @@ A workload is **degraded** when `replicas_desired > replicas_ready`. A pod is
 **unhealthy** when its phase is neither `Running` nor `Succeeded`, **or** its
 restart count is greater than zero — so a pod that recovered after one crash
 still shows up here. `healthy` is true only when both lists are empty.
+
+---
+
+### `list_resources`
+
+| Argument | Type | Default | Meaning |
+|---|---|---|---|
+| `group` | `str` | — | API group, e.g. `gateway.networking.k8s.io` |
+| `version` | `str` | — | API version, e.g. `v1` |
+| `plural` | `str` | — | Resource plural, e.g. `httproutes` |
+| `namespace` | `str \| None` | `None` | Restrict to one namespace |
+
+One generic lister for custom resources, **summarised** rather than dumped: a
+CRD list is kilobytes of status per item, and this exists for inventory. For
+one object in detail, use `describe`.
+
+Each item carries `name`, `namespace`, `created`, `ready` (from a `Ready`
+condition where there is one), and the facts that matter for that kind:
+
+| Plural | Extra fields |
+|---|---|
+| `httproutes`, `grpcroutes`, `tlsroutes` | `hostnames`, `backends` (`name:port`), `accepted` |
+| `clusters` (CNPG) | `instances`, `readyInstances`, `primary`, `phase`, `image` |
+| `certificates` | `dnsNames`, `issuer`, `secret`, `notAfter`, `renewalTime` |
+| `externalsecrets` | `target`, `store`, `synced`, `refreshInterval` |
+| `applications` (ArgoCD) | `sync`, `health`, `revision` |
+| anything else | `conditions` as `{type: status}`, plus scalar `status` fields |
+
+```json
+{
+  "kind": "certificates",
+  "count": 1,
+  "items": [
+    {"name": "wildcard", "namespace": "adhar-system", "ready": true,
+     "dnsNames": ["*.adhar.localtest.me"], "issuer": "letsencrypt",
+     "secret": "wildcard-tls", "notAfter": "2027-01-01T00:00:00Z"}
+  ]
+}
+```
+
+This is what lets the `certificate-expiry` chore see a certificate at all — its
+previous tool list had nothing that could — and what the live knowledge
+inventory uses to know every hostname, database and certificate on the cluster.
 
 ---
 

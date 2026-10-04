@@ -125,10 +125,10 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         tools=(
             "app_status", "sync_status", "app_diff", "list_pods", "describe",
             "get_events", "logs", "resource_health", "promql", "logql",
-            "correlate", "slo_burn", "propose_change",
+            "correlate", "slo_burn", "list_resources", "propose_change",
         ),
         ceiling="suggest",
-        knowledge_kinds=("runbook", "incident", "finding"),
+        knowledge_kinds=("runbook", "incident", "finding", "manifest"),
         keywords=(
             "alert", "down", "degraded", "failing", "crash", "crashloop", "outage",
             "error", "broken", "restart", "unhealthy", "incident", "why is",
@@ -146,7 +146,7 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         ),
         tools=("cost_by", "budget_status", "showback", "resource_health", "promql"),
         ceiling="suggest",
-        knowledge_kinds=("doc", "adr", "finding"),
+        knowledge_kinds=("doc", "adr", "finding", "environment"),
         keywords=(
             "cost", "spend", "budget", "expensive", "showback", "chargeback",
             "savings", "waste", "rightsize", "right-size", "bill", "usage",
@@ -164,10 +164,10 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         ),
         tools=(
             "findings", "policy_explain", "posture", "propose_exception",
-            "describe", "list_pods", "get_events",
+            "describe", "list_pods", "get_events", "list_resources",
         ),
         ceiling="approve-to-apply",
-        knowledge_kinds=("adr", "runbook", "incident"),
+        knowledge_kinds=("adr", "runbook", "incident", "manifest", "environment"),
         keywords=(
             "security", "policy", "kyverno", "cve", "vulnerab", "compliance",
             "rbac", "permission", "forbidden", "denied", "exception", "posture",
@@ -185,10 +185,10 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         ),
         tools=(
             "search_packages", "template_params", "scaffold", "propose_change",
-            "list_xrs", "xr_status", "propose_xr", "app_status",
+            "list_xrs", "xr_status", "propose_xr", "app_status", "list_resources",
         ),
         ceiling="suggest",
-        knowledge_kinds=("adr", "package", "doc"),
+        knowledge_kinds=("adr", "package", "doc", "manifest", "environment", "cli"),
         keywords=(
             "scaffold", "create", "new service", "golden path", "package", "template",
             "provision", "bootstrap", "add a", "set up", "install", "crossplane",
@@ -203,9 +203,12 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
             "Be specific about which environment and which revision. A recommendation to "
             "roll back must name what it rolls back to and what is lost by doing it."
         ),
-        tools=("sync_status", "app_status", "app_diff", "resource_health", "propose_change"),
+        tools=(
+            "sync_status", "app_status", "app_diff", "resource_health",
+            "list_resources", "propose_change",
+        ),
         ceiling="approve-to-apply",
-        knowledge_kinds=("runbook", "adr", "doc"),
+        knowledge_kinds=("runbook", "adr", "doc", "manifest", "environment"),
         keywords=(
             "deploy", "release", "promote", "promotion", "rollback", "roll back",
             "sync", "outofsync", "out of sync", "drift", "kargo", "argocd",
@@ -223,7 +226,7 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         ),
         tools=("search_packages", "template_params"),
         ceiling="read-only",
-        knowledge_kinds=("doc", "adr", "runbook", "package"),
+        knowledge_kinds=("doc", "adr", "runbook", "package", "cli", "environment", "manifest"),
         keywords=(
             "how do i", "how to", "what is", "where is", "explain", "documentation",
             "getting started", "onboard", "tutorial", "guide", "convention",

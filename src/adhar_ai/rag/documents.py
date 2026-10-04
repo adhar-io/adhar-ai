@@ -45,7 +45,10 @@ KIND_WEIGHTS: dict[str, float] = {
     "adr": 1.10,  # why the platform is the way it is
     "tool": 1.10,  # what the agent can actually do
     "package": 1.05,  # what is installed and how it is configured
+    "manifest": 1.05,  # what a package actually deploys: images, secrets, routes
+    "environment": 1.05,  # which packages are on, where
     "resource": 1.05,  # live state
+    "cli": 1.05,  # the `adhar` command that does it
     "doc": 1.00,
     "qa": 0.95,  # a previous answer: useful precedent, not a source of truth
     "note": 0.95,  # meeting notes and asides
@@ -91,7 +94,10 @@ class Chunk:
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def as_grounding(self, retrieval: str = "vector") -> str:
-        return f"### {self.source} ({self.kind}, {retrieval})\n\n{self.text}"
+        """The block the model reads. The source and its kind — not how it was
+        retrieved, which is operator diagnostics the model would only echo."""
+        del retrieval  # kept in the signature for callers; see `Hit.retrieval`
+        return f"### {self.source} ({self.kind})\n\n{self.text}"
 
 
 def split_on_headings(text: str) -> list[tuple[str, str]]:
