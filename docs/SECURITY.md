@@ -15,7 +15,7 @@ claims a control the code does not implement, this document corrects it.
 
 > **Read tools read. Write tools open a pull request. Nothing applies to a cluster.**
 
-There are 28 tools across seven domains. Four of them are writes —
+There are 29 tools across seven domains. Four of them are writes —
 `propose_change`, `propose_xr`, `propose_exception`, `scaffold` — and all four do
 exactly one thing: create a branch in Gitea, commit files to it, and open a pull
 request. A human merges; ArgoCD reconciles. The agent's authority is a

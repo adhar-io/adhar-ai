@@ -17,7 +17,15 @@ from adhar_ai.mcp.common import pr as pr_module
 from adhar_ai.mcp.server import build_app, build_server, tool_access
 
 EXPECTED = {
-    "cluster": {"list_pods", "describe", "get_events", "logs", "resource_health", "list_resources"},
+    "cluster": {
+        "list_pods",
+        "describe",
+        "get_events",
+        "logs",
+        "resource_health",
+        "list_resources",
+        "insights",
+    },
     "gitops": {"app_status", "app_diff", "sync_status", "propose_change"},
     "provision": {"list_xrs", "xr_status", "propose_xr"},
     "observability": {"promql", "logql", "traceql", "slo_burn", "correlate"},

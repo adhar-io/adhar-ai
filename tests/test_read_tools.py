@@ -447,3 +447,87 @@ async def test_list_resources_summarises_each_kind_by_what_matters(mcp_cfg, fake
     )
     assert widgets["items"][0]["ready"] is False
     assert widgets["items"][0]["status"] == {"phase": "Up"}
+
+
+RESULTS = [
+    {
+        "metadata": {"name": "adharsystemconsole", "namespace": "adhar-system",
+                     "creationTimestamp": "2026-10-04T10:00:00Z"},
+        "spec": {"kind": "Service", "name": "console", "namespace": "adhar-system",
+                 "error": [{"text": "Service has no endpoints, expected label app=console"}],
+                 "details": "", "parentObject": "", "backend": "openai"},
+        "status": {"lifecycle": ""},
+    },
+    {
+        "metadata": {"name": "adharsystemcheckout", "namespace": "adhar-system"},
+        "spec": {"kind": "Pod", "name": "checkout-7f9c", "namespace": "adhar-system",
+                 "error": [{"text": "back-off 5m0s restarting failed container"},
+                           {"text": "the last termination reason is OOMKilled"}],
+                 "details": "The container is being killed for exceeding its memory limit.",
+                 "parentObject": "Deployment/checkout"},
+        "status": {"lifecycle": "historical"},
+    },
+    {
+        "metadata": {"name": "paymentsdb", "namespace": "payments"},
+        "spec": {"kind": "Pod", "name": "db-0", "namespace": "payments",
+                 "error": [{"text": "ImagePullBackOff"}]},
+        "status": {},
+    },
+]
+
+
+async def test_insights_groups_k8sgpt_results_by_kind_and_namespace(mcp_cfg, fake_kube):
+    """k8sgpt is the sensor and this is how the agent reads it: the OBJECT the
+    problem is about, the analyzer's evidence, and k8sgpt's own explanation
+    where its model ran — never the Result's hash of a name as the subject."""
+    fake_kube.custom["results"] = RESULTS
+    server = server_for("cluster", mcp_cfg)
+
+    out = await call(server, "insights", {})
+    assert out["available"] is True and out["count"] == 3
+    assert out["by_kind"] == {"Pod": 2, "Service": 1}
+    assert out["by_namespace"] == {"adhar-system": 2, "payments": 1}
+
+    svc = next(r for r in out["results"] if r["kind"] == "Service")
+    assert svc["name"] == "console"
+    assert svc["errors"] == ["Service has no endpoints, expected label app=console"]
+    assert svc["details"] is None, "no model ran; no invented explanation"
+
+    pod = next(r for r in out["results"] if r["name"] == "checkout-7f9c")
+    assert pod["parent"] == "Deployment/checkout"
+    assert "OOMKilled" in pod["errors"][1]
+    assert pod["details"].startswith("The container is being killed")
+
+    only_pods = await call(server, "insights", {"kind": "pod"})
+    assert only_pods["count"] == 2 and all(r["kind"] == "Pod" for r in only_pods["results"])
+    scoped = await call(server, "insights", {"namespace": "payments"})
+    assert scoped["count"] == 1 and scoped["results"][0]["name"] == "db-0"
+
+
+async def test_insights_says_so_when_k8sgpt_is_not_installed(mcp_cfg, fake_kube):
+    """An absent CRD is the normal state of a cluster without the package. It
+    must read as "nothing here", not as a tool failure the model apologises for."""
+
+    def missing(group, version, plural, namespace=None):
+        raise RuntimeError("(404) Reason: Not Found: the server could not find the resource")
+
+    fake_kube.list_custom = missing
+    server = server_for("cluster", mcp_cfg)
+    out = await call(server, "insights", {})
+    assert out == {
+        "available": False,
+        "count": 0,
+        "results": [],
+        "note": "no k8sgpt Results in this cluster; is the ai/k8sgpt package enabled?",
+    }
+
+
+async def test_list_resources_knows_k8sgpt_results_too(mcp_cfg, fake_kube):
+    fake_kube.custom["results"] = RESULTS
+    server = server_for("cluster", mcp_cfg)
+    out = await call(
+        server,
+        "list_resources",
+        {"group": "core.k8sgpt.ai", "version": "v1alpha1", "plural": "results"},
+    )
+    assert out["items"][0]["objectKind"] == "Service" and out["items"][0]["object"] == "console"

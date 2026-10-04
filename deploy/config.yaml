@@ -132,7 +132,8 @@ findings:
 # A name that is not in the shipped catalogue is IGNORED with a warning rather
 # than created, so a typo cannot bring unreviewed automation into existence.
 # Shipped: certificate-expiry, drift-reconciliation, orphaned-resources,
-# failing-scorecards, cost-outliers, security-findings, runbook-rot.
+# failing-scorecards, cost-outliers, security-findings, cluster-insights,
+# runbook-rot.
 #
 #   chores:
 #     certificate-expiry:

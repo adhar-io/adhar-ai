@@ -206,7 +206,7 @@ platform earns its keep and where it does the most damage when wrong: a chore
 that opens twelve pull requests on a Monday morning gets the whole layer
 switched off, and it deserves to.
 
-Seven ship, **all off, all in dry-run**:
+Eight ship, **all off, all in dry-run**:
 
 | Chore | Looks for |
 |---|---|
@@ -216,6 +216,7 @@ Seven ship, **all off, all in dry-run**:
 | `failing-scorecards` | the one criterion that would lift the worst grade |
 | `cost-outliers` | namespaces that moved sharply against their own baseline |
 | `security-findings` | violations and findings older than a week, grouped by cause |
+| `cluster-insights` | what k8sgpt's 22 analyzers found today, grouped by cause rather than by object |
 | `runbook-rot` | procedures referencing things that no longer exist |
 
 Enabling and going live are **two separate decisions**:

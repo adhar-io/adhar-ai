@@ -110,7 +110,7 @@ for k, v in d.items():
 ```
 
 ```
-domains: 7  tools: 28
+domains: 7  tools: 29
   cluster        5 tools  writes=[]
   gitops         4 tools  writes=['propose_change']
   provision      3 tools  writes=['propose_xr']
@@ -511,7 +511,7 @@ Locally, point at a single server instead:
   "url": "http://localhost:18101/mcp" } } }
 ```
 
-Your agent gets the same 28 tools, the same read/write tagging, and the same
+Your agent gets the same 29 tools, the same read/write tagging, and the same
 guarantee: the only write it can perform is opening a pull request.
 
 ---

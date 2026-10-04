@@ -325,6 +325,39 @@ class ClusterSource:
                 )
             )
 
+        if insights := await self._call("insights", {"limit": 150}):
+            if insights.get("available") and insights.get("count"):
+                # k8sgpt's view of the cluster, as knowledge. A question about a
+                # Service that selects nothing is answered from this before any
+                # tool runs — and the chore that writes runbooks reads it too.
+                lines = [
+                    "# Cluster insights from k8sgpt (live)",
+                    "",
+                    f"{insights['count']} problem(s) found by k8sgpt's analyzers. "
+                    f"By kind: {insights.get('by_kind')}. "
+                    f"By namespace: {insights.get('by_namespace')}.",
+                    "",
+                ]
+                for row in insights.get("results") or []:
+                    where = f" in `{row['namespace']}`" if row.get("namespace") else ""
+                    lines.append(f"## {row.get('kind')} `{row.get('name')}`{where}")
+                    lines.append("")
+                    for err in row.get("errors") or []:
+                        lines.append(f"- {err}")
+                    if row.get("details"):
+                        lines += ["", f"k8sgpt's explanation: {row['details']}"]
+                    lines.append("")
+                docs.append(
+                    Document(
+                        doc_id="cluster:k8sgpt-insights",
+                        source="live: k8sgpt insights",
+                        text="\n".join(lines),
+                        kind="finding",
+                        origin=self.origin,
+                        metadata={"count": insights["count"], "byKind": insights.get("by_kind")},
+                    )
+                )
+
         if packages := await self._call("search_packages", {}):
             rows = packages.get("packages") or packages.get("results") or []
             if rows:

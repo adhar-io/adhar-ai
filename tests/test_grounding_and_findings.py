@@ -210,3 +210,46 @@ async def test_a_save_failure_never_breaks_the_run_that_produced_it() -> None:
     store = FindingStore(dsn="postgresql://nobody@127.0.0.1:1/none")
     store.enabled = True  # pretend prepare() succeeded, then the DB went away
     await store.save(finding())  # must not raise
+
+
+async def test_the_live_cluster_source_carries_k8sgpt_insights_as_findings() -> None:
+    """What k8sgpt sees becomes knowledge, under the kind the platform uses for
+    its own observations about itself, so a question about a Service that
+    selects nothing is answered from it before any tool runs."""
+    from adhar_ai.rag.sources import ClusterSource
+
+    class Toolbox:
+        async def call(self, name, args):
+            if name == "insights":
+                return {
+                    "available": True,
+                    "count": 1,
+                    "by_kind": {"Service": 1},
+                    "by_namespace": {"adhar-system": 1},
+                    "results": [
+                        {"kind": "Service", "name": "console", "namespace": "adhar-system",
+                         "errors": ["Service has no endpoints, expected label app=console"],
+                         "details": None}
+                    ],
+                }
+            return {"error": "not configured"}
+
+    docs = await ClusterSource(Toolbox()).documents()
+    insight = next(d for d in docs if d.doc_id == "cluster:k8sgpt-insights")
+    assert insight.kind == "finding"
+    assert "Service `console` in `adhar-system`" in insight.text
+    assert "no endpoints" in insight.text
+    assert "k8sgpt's explanation" not in insight.text, "no model ran; nothing to attribute"
+
+
+async def test_no_insights_document_when_k8sgpt_is_absent_or_quiet() -> None:
+    from adhar_ai.rag.sources import ClusterSource
+
+    class Quiet:
+        async def call(self, name, args):
+            if name == "insights":
+                return {"available": True, "count": 0, "results": []}
+            return {"error": "not configured"}
+
+    docs = await ClusterSource(Quiet()).documents()
+    assert not any(d.doc_id == "cluster:k8sgpt-insights" for d in docs)

@@ -82,6 +82,63 @@ def register(mcp: Any, cfg: MCPConfig) -> None:
         }
 
     @read
+    async def insights(
+        namespace: str | None = None, kind: str | None = None, limit: int = 100
+    ) -> dict[str, Any]:
+        """What k8sgpt found wrong in the cluster, grouped by the kind of object.
+
+        k8sgpt runs 22 analyzers every ten minutes and writes one `Result` per
+        problem: a Service selecting no pods, a PVC stuck Pending, an unattached
+        HTTPRoute, a pod in CrashLoopBackOff, a webhook pointing at nothing.
+        This lists those Results — the raw evidence (`errors`) and, where
+        k8sgpt's own explanation ran, its `details` — so the agent starts from
+        a cluster-wide picture rather than one object at a time.
+
+        namespace: restrict to problems in one namespace (omit for all).
+        kind: restrict to one object kind, e.g. "Service" or "Pod".
+        limit: most Results to return; the summary counts always cover them all.
+
+        Read-only. If the k8sgpt package is not installed there are no Results
+        and this says so rather than failing.
+        """
+        kube = get_kube_client()
+        try:
+            items = kube.list_custom("core.k8sgpt.ai", "v1alpha1", "results", namespace)
+        except Exception as exc:  # noqa: BLE001 - absent CRD, not an error in the question
+            text = str(exc)
+            if "404" in text or "NotFound" in text or "not found" in text.lower():
+                return {
+                    "available": False,
+                    "count": 0,
+                    "results": [],
+                    "note": "no k8sgpt Results in this cluster; is the ai/k8sgpt package enabled?",
+                }
+            raise
+        rows = [_insight_summary(i) for i in items]
+        if namespace:
+            # The API call is already scoped; this keeps the promise if a
+            # client lists cluster-wide, as a fake or a cached lister might.
+            rows = [r for r in rows if r.get("namespace") == namespace]
+        if kind:
+            rows = [r for r in rows if (r.get("kind") or "").lower() == kind.lower()]
+        by_kind: dict[str, int] = {}
+        by_namespace: dict[str, int] = {}
+        for r in rows:
+            by_kind[r.get("kind") or "?"] = by_kind.get(r.get("kind") or "?", 0) + 1
+            ns = r.get("namespace") or "(cluster)"
+            by_namespace[ns] = by_namespace.get(ns, 0) + 1
+        rows.sort(
+            key=lambda r: (r.get("kind") or "", r.get("namespace") or "", r.get("name") or "")
+        )
+        return {
+            "available": True,
+            "count": len(rows),
+            "by_kind": dict(sorted(by_kind.items())),
+            "by_namespace": dict(sorted(by_namespace.items())),
+            "results": rows[: max(0, limit)],
+        }
+
+    @read
     async def resource_health(namespace: str | None = None) -> dict[str, Any]:
         """Deployment rollout health — desired vs ready replicas, plus the
         unhealthy pods behind any shortfall."""
@@ -168,6 +225,13 @@ def _resource_summary(plural: str, obj: dict[str, Any]) -> dict[str, Any]:
         summary["store"] = (spec.get("secretStoreRef") or {}).get("name")
         summary["synced"] = conditions.get("Ready") == "True"
         summary["refreshInterval"] = spec.get("refreshInterval")
+    elif plural == "results":  # k8sgpt
+        summary["objectKind"] = spec.get("kind")
+        summary["object"] = spec.get("name")
+        summary["errors"] = [
+            str(e.get("text") or "")[:200] for e in spec.get("error") or [] if isinstance(e, dict)
+        ][:4]
+        summary["phase"] = status.get("lifecycle")
     elif plural == "applications":
         summary["sync"] = (status.get("sync") or {}).get("status")
         summary["health"] = (status.get("health") or {}).get("status")
@@ -180,3 +244,33 @@ def _resource_summary(plural: str, obj: dict[str, Any]) -> dict[str, Any]:
             k: v for k, v in status.items() if not isinstance(v, (dict, list))
         }
     return summary
+
+
+def _insight_summary(obj: dict[str, Any]) -> dict[str, Any]:
+    """One k8sgpt Result, as the facts it carries.
+
+    `spec.kind`/`spec.name` are the OBJECT the problem is about (the Result's
+    own name is a hash). `error[].text` is the analyzer's evidence; `details`
+    is k8sgpt's explanation when its AI ran, and empty when it did not.
+    """
+    meta = obj.get("metadata") or {}
+    spec = obj.get("spec") or {}
+    status = obj.get("status") or {}
+    errors = [
+        str(e.get("text") or "").strip()
+        for e in spec.get("error") or []
+        if isinstance(e, dict) and e.get("text")
+    ]
+    parent = spec.get("parentObject") or ""
+    return {
+        "result": meta.get("name"),
+        "kind": spec.get("kind"),
+        "name": spec.get("name"),
+        "namespace": spec.get("namespace") or meta.get("namespace"),
+        "parent": parent or None,
+        "errors": errors[:8],
+        "details": str(spec.get("details") or "")[:1200] or None,
+        "phase": status.get("lifecycle"),
+        "backend": spec.get("backend") or None,
+        "firstSeen": meta.get("creationTimestamp"),
+    }

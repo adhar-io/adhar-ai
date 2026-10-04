@@ -21,6 +21,10 @@
       "access": "read"
     },
     {
+      "name": "insights",
+      "access": "read"
+    },
+    {
       "name": "resource_health",
       "access": "read"
     }

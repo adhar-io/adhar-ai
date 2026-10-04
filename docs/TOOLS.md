@@ -1,12 +1,12 @@
 # 🧰 Tool Reference
 
-Adhar AI exposes **28 tools across 7 domains**. Each domain is its own MCP
+Adhar AI exposes **29 tools across 7 domains**. Each domain is its own MCP
 server — one container image, seven Deployments, differing only by
 `ADHAR_AI_MCP_DOMAIN`.
 
 | Domain | Server name | Read tools | Write tools |
 |---|---|---|---|
-| `cluster` | `adhar-cluster` | `list_pods`, `describe`, `get_events`, `logs`, `resource_health`, `list_resources` | — |
+| `cluster` | `adhar-cluster` | `list_pods`, `describe`, `get_events`, `logs`, `resource_health`, `list_resources`, `insights` | — |
 | `gitops` | `adhar-gitops` | `app_status`, `sync_status`, `app_diff` | `propose_change` |
 | `provision` | `adhar-provision` | `list_xrs`, `xr_status` | `propose_xr` |
 | `observability` | `adhar-observability` | `promql`, `logql`, `traceql`, `slo_burn`, `correlate` | — |
@@ -291,6 +291,43 @@ condition where there is one), and the facts that matter for that kind:
 This is what lets the `certificate-expiry` chore see a certificate at all — its
 previous tool list had nothing that could — and what the live knowledge
 inventory uses to know every hostname, database and certificate on the cluster.
+
+---
+
+### `insights`
+
+| Argument | Type | Default | Meaning |
+|---|---|---|---|
+| `namespace` | `str \| None` | `None` | Restrict to problems in one namespace |
+| `kind` | `str \| None` | `None` | Restrict to one object kind, e.g. `Service` |
+| `limit` | `int` | `100` | Most Results returned; the counts always cover them all |
+
+What **k8sgpt** found wrong, cluster-wide. The `ai/k8sgpt` package runs 22
+analyzers every ten minutes — pods, workloads, Services selecting nothing, PVCs
+stuck Pending, unattached HTTPRoutes, webhooks pointing at nothing, node
+pressure — and writes one `Result` per problem. This lists them grouped by kind
+and namespace, with the analyzer's evidence (`errors`), k8sgpt's own explanation
+where its model ran (`details`), and the object's parent.
+
+```json
+{
+  "available": true,
+  "count": 3,
+  "by_kind": {"Pod": 2, "Service": 1},
+  "by_namespace": {"adhar-system": 3},
+  "results": [
+    {"kind": "Service", "name": "console", "namespace": "adhar-system",
+     "errors": ["Service has no endpoints, expected label app=console"],
+     "details": null, "phase": "", "parent": null}
+  ]
+}
+```
+
+With the package absent there are no Results and `available` is `false` with a
+note, rather than an error. The `incident` and `platform` agents hold this tool;
+the `cluster-insights` chore summarises new Results daily. k8sgpt is the sensor
+and Adhar AI is the brain: the Results are evidence, and the explanation comes
+from an agent that also knows the manifests, environments and runbooks.
 
 ---
 

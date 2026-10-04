@@ -118,14 +118,16 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         role="Triage an alert, correlate signals, find the cause, propose the fix.",
         instructions=(
             "You are on call. Establish what is broken, what changed, and what the "
-            "blast radius is, in that order. Prefer evidence over inference: name the "
-            "pod, the event, the log line. If the cause is outside your tools, say so "
-            "and name what you would need."
+            "blast radius is, in that order. Start wide: `insights` is what k8sgpt's "
+            "analyzers already found across the cluster, and the problem you were asked "
+            "about is often one of several with one cause. Prefer evidence over "
+            "inference: name the pod, the event, the log line. If the cause is outside "
+            "your tools, say so and name what you would need."
         ),
         tools=(
             "app_status", "sync_status", "app_diff", "list_pods", "describe",
             "get_events", "logs", "resource_health", "promql", "logql",
-            "correlate", "slo_burn", "list_resources", "propose_change",
+            "correlate", "slo_burn", "list_resources", "insights", "propose_change",
         ),
         ceiling="suggest",
         knowledge_kinds=("runbook", "incident", "finding", "manifest"),
@@ -185,7 +187,7 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         ),
         tools=(
             "search_packages", "template_params", "scaffold", "propose_change",
-            "list_xrs", "xr_status", "propose_xr", "app_status", "list_resources",
+            "list_xrs", "xr_status", "propose_xr", "app_status", "list_resources", "insights",
         ),
         ceiling="suggest",
         knowledge_kinds=("adr", "package", "doc", "manifest", "environment", "cli"),

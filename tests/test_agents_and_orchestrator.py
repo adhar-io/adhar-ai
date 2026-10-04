@@ -408,3 +408,33 @@ async def test_an_unparseable_plan_still_produces_something_to_approve():
     assert await plan_first(orchestrator, task) is True
     assert len(task.plan) == 1
     assert "no changes" in task.plan[0].description
+
+
+def test_every_agent_and_chore_tool_exists_in_the_contract():
+    """A tool name that is not in the contract is offered to no model and the
+    agent silently has less than its roster says. Caught here, not in a
+    transcript three weeks later."""
+    import json
+    from pathlib import Path
+
+    from adhar_ai.runtime.chores import DEFAULT_CHORES
+
+    contract = json.loads((Path(__file__).resolve().parents[1] / "contract/tools.json").read_text())
+    names: set[str] = set()
+    stack = [contract]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if "name" in node and "access" in node:
+                names.add(str(node["name"]))
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    assert "insights" in names and "list_resources" in names
+
+    for agent in DEFAULT_AGENTS:
+        unknown = set(agent.tools) - names
+        assert not unknown, f"agent {agent.name} declares unknown tools: {sorted(unknown)}"
+    for chore in DEFAULT_CHORES:
+        unknown = set(chore.tools) - names
+        assert not unknown, f"chore {chore.name} declares unknown tools: {sorted(unknown)}"

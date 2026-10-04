@@ -120,12 +120,12 @@ HEALTH="${WORK}/health.json"
 curl -fsS "http://127.0.0.1:${RUNTIME_PORT}/healthz" > "${HEALTH}"
 
 step "The runtime mounted every domain and every tool"
-uv run python - "${HEALTH}" <<'PY' && pass "7 domains, 28 tools, none unreachable" || fail "tool inventory is wrong"
+uv run python - "${HEALTH}" <<'PY' && pass "7 domains, 29 tools, none unreachable" || fail "tool inventory is wrong"
 import json, sys
 h = json.load(open(sys.argv[1]))
 assert len(h["mcp_servers_connected"]) == 7, h["mcp_servers_connected"]
 assert not h["mcp_servers_unreachable"], h["mcp_servers_unreachable"]
-assert len(h["tools"]) == 28, len(h["tools"])
+assert len(h["tools"]) == 29, len(h["tools"])
 for w in ("propose_change", "propose_xr", "propose_exception", "scaffold"):
     assert w in h["tools"], w
 PY
@@ -315,7 +315,7 @@ assert answer["agent"] == "cost", answer["agent"]
 declared = set(roster["cost"]["tools"])
 used = {c["tool"] for c in answer.get("tool_calls", [])}
 assert used <= declared, f"called {used - declared}, which it never declared"
-print(f"      cost declares {len(declared)} tools; the whole surface is 28")
+print(f"      cost declares {len(declared)} tools; the whole surface is 29")
 CHECK
 
 step "A read-only agent stays read-only"

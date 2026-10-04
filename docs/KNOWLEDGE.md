@@ -42,7 +42,7 @@ nothing else.
 | 📜 Manifests | `manifests` | "which image does it run, which secret does it read, what is its URL, which database does it bind" |
 | 🌍 Environments | `environments` | "which packages are enabled in production, and where do they deploy" |
 | ⌨️ The `adhar` CLI | `cli` | "what command does that, and what are its flags" |
-| ☸️ Live cluster | `cluster` | "what is running right now, and is it healthy" |
+| ☸️ Live cluster | `cluster` | "what is running right now, and is it healthy" — including what **k8sgpt**'s analyzers found, read through the `insights` tool and indexed as findings |
 | 🔍 Operator findings | `findings` | "has the platform noticed this before" |
 | 📝 Human notes | `notes` | "what did we decide, and what did we learn" |
 
@@ -199,7 +199,7 @@ answer needs is bounded, not a graph workload.
 | `packages` | every package in the platform stack | `depends_on` between them |
 | `argocd` | ArgoCD Applications and the packages they ship | `deploys` |
 | `workloads` | pods in the platform namespace, plus the components and teams that own them | `runs_in`, `owns` |
-| `tools` | the seven MCP domains and their 28 tools | `serves` |
+| `tools` | the seven MCP domains and their 29 tools | `serves` |
 
 Each source is refreshed independently and **replaces only its own origin**. A
 package refresh that wiped the workload nodes would empty the graph between
@@ -247,7 +247,7 @@ curl -sS localhost:8080/knowledge | jq .graph
 ```json
 { "status": "ready", "nodes": 127, "edges": 157,
   "byKind": [ {"origin": "packages", "kind": "Package", "count": 93},
-              {"origin": "tools",    "kind": "Tool",    "count": 28},
+              {"origin": "tools",    "kind": "Tool",    "count": 29},
               {"origin": "tools",    "kind": "Domain",  "count":  7} ],
   "byRelation": [ {"relation": "depends_on", "count": 130},
                   {"relation": "serves",     "count":  27} ] }

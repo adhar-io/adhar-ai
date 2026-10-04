@@ -159,6 +159,22 @@ DEFAULT_CHORES: tuple[ChoreSpec, ...] = (
         dedupe_hint="finding",
     ),
     ChoreSpec(
+        name="cluster-insights",
+        summary="What k8sgpt found wrong today, grouped by cause rather than by object.",
+        prompt=(
+            "Read the current k8sgpt insights for the whole cluster. Group the problems "
+            "by their underlying cause — twelve pods failing one image pull is one "
+            "problem — and for each cause say which objects it affects, what the "
+            "evidence is, and the single most likely fix. Lead with anything that "
+            "affects a platform service people depend on. If k8sgpt reports nothing, "
+            "say so in one line."
+        ),
+        tools=("insights", "describe", "get_events", "resource_health", "list_resources"),
+        agent="incident",
+        interval=86400.0,
+        dedupe_hint="insight",
+    ),
+    ChoreSpec(
         name="runbook-rot",
         summary="Documented procedures that reference things which no longer exist.",
         prompt=(

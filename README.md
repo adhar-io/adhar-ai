@@ -13,7 +13,7 @@
 [![Adhar AI](https://img.shields.io/badge/adhar--ai-0.3.1-blue?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMTIgMkw0IDhWMTVDNCAxOC4zMSA2LjY5IDIxIDEwIDIxQzEzLjMxIDIxIDE2IDE4LjMxIDE2IDE1VjhMMTIgMloiIGZpbGw9IndoaXRlIi8+PC9zdmc+)](https://github.com/adhar-io/adhar-ai/releases)
 [![MCP](https://img.shields.io/badge/MCP-native-7C3AED?logo=anthropic)](https://modelcontextprotocol.io)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org)
-[![Tools](https://img.shields.io/badge/governed_tools-28-blue)](contract/tools.json)
+[![Tools](https://img.shields.io/badge/governed_tools-29-blue)](contract/tools.json)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?logo=apache)](LICENSE)
 [![Slack](https://img.shields.io/badge/slack-join_community-4A154B?logo=slack)](https://join.slack.com/t/adharworkspace/shared_invite/zt-26586j9sx-QGrIejNigvzGJrnyH~IXww)
 
@@ -95,7 +95,7 @@ the two.
 
 | Domain | 👀 Read tools | ✍️ Write tools (PR-only) |
 |---|---|---|
-| `cluster` | `list_pods`, `describe`, `get_events`, `logs`, `resource_health`, `list_resources` | — |
+| `cluster` | `list_pods`, `describe`, `get_events`, `logs`, `resource_health`, `list_resources`, `insights` | — |
 | `gitops` | `app_status`, `sync_status`, `app_diff` | `propose_change` |
 | `provision` | `list_xrs`, `xr_status` | `propose_xr` |
 | `observability` | `promql`, `logql`, `traceql`, `slo_burn`, `correlate` | — |
@@ -103,7 +103,7 @@ the two.
 | `cost` | `cost_by`, `budget_status`, `showback` | — |
 | `catalog` | `search_packages`, `template_params` | `scaffold` |
 
-**28 tools, 4 of them writes.** There is deliberately no `kubectl_apply`,
+**29 tools, 4 of them writes.** There is deliberately no `kubectl_apply`,
 `argo_sync`, `helm_install` or cloud-mutation tool, and a test asserts each of
 those names is absent from every domain.
 
@@ -388,7 +388,7 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 |---|---|
 | 🚀 **[Getting Started](docs/GETTING_STARTED.md)** | From `uv sync` to a grounded answer to an opened PR, step by step |
 | 🏛️ **[Architecture](docs/ARCHITECTURE.md)** | How the three components, the seven servers and the data plane fit together |
-| 🧰 **[Tool Reference](docs/TOOLS.md)** | Every one of the 28 tools: arguments, backend, failure mode |
+| 🧰 **[Tool Reference](docs/TOOLS.md)** | Every one of the 29 tools: arguments, backend, failure mode |
 | 🧠 **[Knowledge Base](docs/KNOWLEDGE.md)** | What the agent knows, how it stays current, and how it learns |
 | 🤖 **[Agents & Automation](docs/AGENTS.md)** | The specialist roster, durable tasks, approvals, chores and journeys |
 | 🏭 **[Production](docs/PRODUCTION.md)** | Metrics, resilience, admission control, safety and the quality gates |
