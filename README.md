@@ -13,7 +13,7 @@
 [![Adhar AI](https://img.shields.io/badge/adhar--ai-0.1.0-blue?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMTIgMkw0IDhWMTVDNCAxOC4zMSA2LjY5IDIxIDEwIDIxQzEzLjMxIDIxIDE2IDE4LjMxIDE2IDE1VjhMMTIgMloiIGZpbGw9IndoaXRlIi8+PC9zdmc+)](https://github.com/adhar-io/adhar-ai)
 [![MCP](https://img.shields.io/badge/MCP-native-7C3AED?logo=anthropic)](https://modelcontextprotocol.io)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org)
-[![Release](https://img.shields.io/badge/release-0.2.0-0A7EA4?logo=github)](https://github.com/adhar-io/adhar-ai/releases)
+[![Release](https://img.shields.io/badge/release-0.3.0-0A7EA4?logo=github)](https://github.com/adhar-io/adhar-ai/releases)
 [![Tools](https://img.shields.io/badge/governed_tools-28-blue)](contract/tools.json)
 [![Writes](https://img.shields.io/badge/writes-pull_request_only-success?logo=git)](#-the-rule-that-shapes-everything)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?logo=apache)](LICENSE)
