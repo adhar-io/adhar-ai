@@ -339,7 +339,7 @@ on, and every grounding block names its source *and* which path found it.
 
 ## 🔀 Providers
 
-`local` — no key. The model runs on the platform (`ai/llm-d`: vLLM replicas behind the llm-d router with an agentgateway sidecar) and agentgateway routes every `local/*` model name there; `ADHAR_AI_LLM_PROVIDER=local` selects it and `DEFAULT_MODELS["local"]` names the served model.
+`local` — no key. The model runs on the platform (`ai/llm-d`: vLLM behind the llm-d router with an agentgateway sidecar — **Qwen3.6-27B-FP8 on one GPU**, or Qwen2.5-0.5B on CPU) and agentgateway routes every `local/*` model name there. Both profiles answer to `local/default`. The hosted key stays **primary**; `ADHAR_AI_LLM_SECONDARY_MODEL=local/default` (set by the platform manifests) makes the self-hosted model the **secondary** every agentic feature falls back to when the primary fails — never on a budget or policy refusal — and `/healthz` → `llm.answered_by` says which one answered. `ADHAR_AI_LLM_PROVIDER=local` makes it primary instead.
 
 Everything here speaks `/v1/chat/completions` and `/v1/models` to whatever
 gateway `LLM_GATEWAY_URL` points at, and **always names a model in the body**.
@@ -389,6 +389,7 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 | 🚀 **[Getting Started](docs/GETTING_STARTED.md)** | From `uv sync` to a grounded answer to an opened PR, step by step |
 | 🏛️ **[Architecture](docs/ARCHITECTURE.md)** | How the three components, the seven servers and the data plane fit together |
 | 🧰 **[Tool Reference](docs/TOOLS.md)** | Every one of the 29 tools: arguments, backend, failure mode |
+| 🔌 **[Connect a client](docs/CONNECT.md)** | Claude Code, Cursor, Claude Desktop or your own agent on the Adhar MCP endpoint, in one command |
 | 🧠 **[Knowledge Base](docs/KNOWLEDGE.md)** | What the agent knows, how it stays current, and how it learns |
 | 🤖 **[Agents & Automation](docs/AGENTS.md)** | The specialist roster, durable tasks, approvals, chores and journeys |
 | 🏭 **[Production](docs/PRODUCTION.md)** | Metrics, resilience, admission control, safety and the quality gates |
@@ -521,7 +522,7 @@ Phase 3 agentic entry.
 | Container images on GHCR | ✅ eight names from one build, Cosign-keyless signed with an SPDX SBOM attached |
 | The running build is identifiable | ✅ `/healthz` reports `version` and the commit `revision`, baked in at build time |
 | GPU run of the `ai/vllm` profile | ⏳ needs a GPU node pool |
-| Self-hosted inference on CPU via `ai/llm-d` (router + agentgateway sidecar → vLLM), provider `local` | ⏳ built 2026-09-15, awaiting the DigitalOcean end-to-end run |
+| Self-hosted inference via `ai/llm-d` (router + agentgateway sidecar → vLLM), CPU profile and Qwen3.6-27B-FP8 GPU profile, wired as the secondary model of every agentic feature | ⏳ CPU profile ran 2026-09-24; GPU profile and the fallback path await a GPU cluster |
 | Tool re-discovery without a runtime restart (`MCPToolbox.refresh()`) | ✅ unit-tested (a rolled MCP server used to need a restart) |
 
 ### What a live run proved

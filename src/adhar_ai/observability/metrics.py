@@ -119,6 +119,14 @@ LLM_REQUESTS = Counter(
     ["model", "outcome"],
     registry=REGISTRY,
 )
+LLM_FALLBACKS = Counter(
+    "adhar_ai_llm_fallbacks_total",
+    "Completions answered by the SECONDARY model because the primary failed. "
+    "Non-zero is the self-hosted model earning its keep; a steady rate is the "
+    "hosted provider being down or unkeyed.",
+    ["primary", "secondary", "outcome"],
+    registry=REGISTRY,
+)
 LLM_SECONDS = Histogram(
     "adhar_ai_llm_duration_seconds",
     "Time for one completion request.",
@@ -289,6 +297,15 @@ def record_usage(model: str, usage: dict | None) -> None:
             if value := usage.get(key):
                 COST_USD.labels(label).inc(float(value))
                 break
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def record_fallback(primary: str, secondary: str, outcome: str) -> None:
+    """One completion that fell through to the secondary model; `outcome` is
+    whether the secondary answered (`ok`) or failed too (`error`)."""
+    try:
+        LLM_FALLBACKS.labels(primary or "unset", secondary or "unset", outcome).inc()
     except Exception:  # noqa: BLE001
         pass
 

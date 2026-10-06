@@ -45,6 +45,10 @@ tools, so it needs no cluster and no credentials.
 
 ## 🔌 How to connect
 
+Client-by-client instructions — Claude Code, Claude Desktop, Cursor, VS Code,
+your own SDK — are in [CONNECT.md](CONNECT.md). This section is what every
+client shares.
+
 ### The federated endpoint
 
 In the platform, the seven servers sit behind

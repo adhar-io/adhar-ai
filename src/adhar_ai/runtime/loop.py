@@ -203,6 +203,7 @@ class GatewayClient:
         breakers: BreakerRegistry | None = None,
         scanner: CredentialScanner | None = None,
         models: ModelPolicy | None = None,
+        secondary_model: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         #: The base URL with exactly one `/v1`, whichever shape was configured.
@@ -224,6 +225,32 @@ class GatewayClient:
         #: Credential kinds masked so far, reported by `/healthz`. Kinds only —
         #: an audit trail that leaks the secret it reports is worse than none.
         self.masked: dict[str, int] = {}
+        #: The model named INSTEAD when the one asked for fails after its
+        #: retries. In the platform this is `local/default` — the self-hosted
+        #: llm-d model — so the hosted key stays primary and every agentic
+        #: feature (chat, tasks, chores, journeys, rerank, rewrite) survives a
+        #: provider outage by answering from inside the cluster. Empty means
+        #: no fallback. A BUDGET refusal (429) and a POLICY refusal are never
+        #: retried on it: those are decisions about this caller, not outages.
+        self.secondary_model = secondary_model
+        #: Completions by the model that actually answered, and how many fell
+        #: through to the secondary. `/healthz` reports both, so "is the
+        #: hosted provider down and are we running on the local model" is a
+        #: question with an answer rather than a guess.
+        self.answered_by: dict[str, int] = {}
+        self.fallbacks: dict[str, int] = {"secondary_answered": 0, "secondary_failed": 0}
+
+    def secondary_for(self, model: str) -> str:
+        """The model to try when `model` fails, or "" when there is none.
+
+        No fallback from the secondary to itself, and none to a model the
+        policy would refuse: the fallback must not widen what a request may
+        spend any more than the request itself may.
+        """
+        secondary = self.secondary_model
+        if not secondary or secondary == model or not self.models.permits(secondary):
+            return ""
+        return secondary
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -283,6 +310,59 @@ class GatewayClient:
             # bundled local-dev gateway ignores it.
             headers["Authorization"] = f"Bearer {bearer}"
 
+        try:
+            payload = await self._complete(body, headers, chosen, tenant, max_tokens)
+        except (BudgetExhausted, ModelNotAllowed):
+            raise
+        except Exception as exc:
+            fallback = self.secondary_for(chosen)
+            if not fallback:
+                raise
+            # The primary is out — after its own retries and with its breaker
+            # consulted. Say so once, at warning, with the model names and
+            # not the prompt; then answer from the secondary.
+            log.warning(
+                "primary model %s failed (%s: %s); answering with secondary %s",
+                chosen,
+                type(exc).__name__,
+                str(exc)[:200],
+                fallback,
+            )
+            body["model"] = fallback
+            try:
+                payload = await self._complete(body, headers, fallback, tenant, max_tokens)
+            except (BudgetExhausted, ModelNotAllowed):
+                self.fallbacks["secondary_failed"] += 1
+                metrics.record_fallback(chosen, fallback, "error")
+                raise
+            except Exception:
+                self.fallbacks["secondary_failed"] += 1
+                metrics.record_fallback(chosen, fallback, "error")
+                raise
+            self.fallbacks["secondary_answered"] += 1
+            metrics.record_fallback(chosen, fallback, "ok")
+            chosen = fallback
+        self.answered_by[chosen] = self.answered_by.get(chosen, 0) + 1
+        return payload
+
+    async def _complete(
+        self,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        chosen: str,
+        tenant: str,
+        max_tokens: int,
+    ) -> dict[str, Any]:
+        """One model's completion, with its retries, breaker, metrics and span.
+
+        Per-MODEL breaker, not per-gateway: the breaker exists to stop hammering
+        a dependency that is down, and the dependency behind `claude-*` (a
+        hosted provider) is not the one behind `local/*` (a pod in this
+        cluster). One breaker for both would open on the hosted provider's
+        failures and then refuse the local model that is the whole point of
+        the fallback.
+        """
+
         async def attempt() -> dict[str, Any]:
             resp = await self._http().post(
                 f"{self.api_base}/chat/completions", json=body, headers=headers
@@ -309,9 +389,9 @@ class GatewayClient:
         ):
             payload = await call_with_resilience(
                 attempt,
-                target="llm-gateway",
+                target=f"llm-gateway/{chosen}",
                 policy=self.retry,
-                breaker=self.breakers.get("llm-gateway"),
+                breaker=self.breakers.get(f"llm-gateway/{chosen}"),
             )
             observed["outcome"] = "ok"
             usage = payload.get("usage") if isinstance(payload, dict) else None

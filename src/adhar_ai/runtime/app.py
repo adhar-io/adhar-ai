@@ -188,7 +188,9 @@ def create_app(
         if toolbox is None:
             await app.state.toolbox.connect()
         app.state.gateway = gateway or GatewayClient(
-            environment.llm_gateway_url, default_model=environment.llm_model
+            environment.llm_gateway_url,
+            default_model=environment.llm_model,
+            secondary_model=environment.llm_secondary_model,
         )
         from ..rag import KnowledgeBase
 
@@ -360,6 +362,18 @@ def create_app(
                 if hasattr(app.state.gateway, "breakers")
                 else {},
                 "credentials_masked": getattr(app.state.gateway, "masked", {}),
+                # Which model is answering. `primary` is what every run names;
+                # `secondary` is the self-hosted model it falls back to (empty:
+                # no fallback); `answered_by` counts completions per model
+                # since start-up and `fallbacks` how many fell through — so
+                # "are we running on the local model right now" is readable
+                # here rather than inferred from provider dashboards.
+                "llm": {
+                    "primary": getattr(app.state.gateway, "default_model", ""),
+                    "secondary": getattr(app.state.gateway, "secondary_model", ""),
+                    "answered_by": getattr(app.state.gateway, "answered_by", {}),
+                    "fallbacks": getattr(app.state.gateway, "fallbacks", {}),
+                },
                 "tasks": {
                     **app.state.tasks.snapshot(),
                     **app.state.queue.snapshot(),

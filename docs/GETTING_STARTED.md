@@ -494,11 +494,21 @@ with `ai/agentgateway` enabled, that is one URL and one token:
     "adhar": {
       "type": "http",
       "url": "https://mcp.<your-host>/mcp",
-      "headers": { "Authorization": "Bearer <keycloak-token>" }
+      "headers": { "Authorization": "Bearer <paste: adhar auth token>" }
     }
   }
 }
 ```
+
+For Claude Code that is one command:
+
+```bash
+claude mcp add --transport http adhar https://mcp.<your-host>/mcp \
+  --header "Authorization: Bearer $(adhar auth token)"
+```
+
+Every client — Claude Desktop, Cursor, VS Code, Windsurf, an SDK — is in
+[CONNECT.md](CONNECT.md), with what goes wrong and why.
 
 Tool names arrive prefixed by their server — `gitops_propose_change`,
 `cluster_list_pods` — because agentgateway federates with `prefixMode: Always`,

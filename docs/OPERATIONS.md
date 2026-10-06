@@ -190,6 +190,7 @@ Accepted algorithms are `RS256`, `RS512` and `ES256`. The subject is
 | `ADHAR_AI_DRIFT_POLL_SECONDS` | `300` | ArgoCD OutOfSync poll interval. The poller waits 15 s after start-up before its first run. |
 | `ADHAR_AI_COST_POLL_SECONDS` | `86400` | OpenCost review interval. First run 60 s after start-up. |
 | `ADHAR_AI_LLM_MODEL` → `MODEL` | `claude-sonnet-5` | The model the loop **names** when a request does not choose one. Under agentgateway the model name is the routing key, so a body without one lands on the fallback rule. |
+| `ADHAR_AI_LLM_SECONDARY_MODEL` → `SECONDARY_MODEL` | `""` (platform manifests: `local/default`) | The model named **instead** when a completion on the primary fails after its retries — transport error, 5xx, an unkeyed gateway. Never on a budget (429) or policy refusal. `local/default` is the alias both llm-d profiles serve (ai/llm-d), so every agentic feature keeps answering from the self-hosted model while the hosted provider is out; `/healthz` → `llm.answered_by` and `llm.fallbacks` show it happening. Empty disables the fallback. |
 
 The lowercase fallbacks (`host`, `dbname`, `port`, `username`, `password`) are
 the keys the CNPG-issued `adhar-ai-rag-app` secret projects through `envFrom`.

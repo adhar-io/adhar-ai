@@ -15,11 +15,13 @@ from adhar_ai.config import DEFAULT_MODELS, PLATFORM_LLM_GATEWAY_URL, RuntimeEnv
 from adhar_ai.gateway.types import FunctionSpec, ToolSpec
 from adhar_ai.rag import Document
 from adhar_ai.rag.sources import DocsSource, classify_doc
+from adhar_ai.resilience import RetryPolicy
 from adhar_ai.runtime.app import create_app
 from adhar_ai.runtime.autonomy import AutonomyError, RuntimeConfig, rank
-from adhar_ai.runtime.loop import GatewayClient, Session, run
+from adhar_ai.runtime.loop import BudgetExhausted, GatewayClient, Session, run
 from adhar_ai.runtime.operators import REGISTRY, OperatorContext
-from adhar_ai.runtime.toolbox import RemoteTool
+from adhar_ai.runtime.toolbox import MCPToolbox, RemoteTool
+from adhar_ai.safety import ModelPolicy
 
 # The `config.yaml` key from the platform's adhar-ai-config ConfigMap, verbatim.
 CONFIGMAP_YAML = """
@@ -618,6 +620,97 @@ async def test_an_explicit_default_model_is_used_when_the_caller_names_none():
         await client.chat([], None, tenant="t")
         await client.aclose()
     assert json.loads(route.calls[0].request.content)["model"] == "claude-opus-4-5-20251101"
+
+
+async def test_a_failing_primary_is_answered_by_the_secondary_model():
+    """The hosted key stays primary; the self-hosted model answers when it is
+    out. Both calls are visible: the body names the secondary, the client
+    counts the fallback, and `answered_by` says who answered."""
+    with respx.mock:
+        route = respx.post(f"{PLATFORM_LLM_GATEWAY_URL}/chat/completions").mock(
+            side_effect=lambda request: (
+                httpx.Response(503, text="provider unkeyed")
+                if json.loads(request.content)["model"] == "claude-sonnet-5"
+                else httpx.Response(200, json=_answer("from the local model"))
+            )
+        )
+        client = GatewayClient(
+            PLATFORM_LLM_GATEWAY_URL,
+            default_model="claude-sonnet-5",
+            secondary_model="local/default",
+            retry=RetryPolicy(attempts=2, base_delay=0.0, timeout=5.0),
+        )
+        payload = await client.chat([], None, tenant="t")
+        await client.aclose()
+    assert payload["choices"][0]["message"]["content"] == "from the local model"
+    models = [json.loads(c.request.content)["model"] for c in route.calls]
+    assert models[-1] == "local/default"
+    assert models[:-1] == ["claude-sonnet-5"] * 2, "the primary gets its own retries first"
+    assert client.fallbacks == {"secondary_answered": 1, "secondary_failed": 0}
+    assert client.answered_by == {"local/default": 1}
+
+
+async def test_a_budget_refusal_is_never_retried_on_the_secondary():
+    """429 is a decision about this caller, not an outage. Falling back would
+    turn the budget into a suggestion."""
+    with respx.mock:
+        route = respx.post(f"{PLATFORM_LLM_GATEWAY_URL}/chat/completions").mock(
+            return_value=httpx.Response(429, text="budget exhausted")
+        )
+        client = GatewayClient(
+            PLATFORM_LLM_GATEWAY_URL,
+            default_model="claude-sonnet-5",
+            secondary_model="local/default",
+        )
+        with pytest.raises(BudgetExhausted):
+            await client.chat([], None, tenant="t")
+        await client.aclose()
+    assert [json.loads(c.request.content)["model"] for c in route.calls] == ["claude-sonnet-5"]
+    assert client.fallbacks["secondary_answered"] == 0
+
+
+async def test_no_secondary_means_the_primary_failure_is_the_failure():
+    with respx.mock:
+        route = respx.post(f"{PLATFORM_LLM_GATEWAY_URL}/chat/completions").mock(
+            return_value=httpx.Response(503, text="down")
+        )
+        client = GatewayClient(
+            PLATFORM_LLM_GATEWAY_URL,
+            default_model="claude-sonnet-5",
+            retry=RetryPolicy(attempts=1, base_delay=0.0, timeout=5.0),
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.chat([], None, tenant="t")
+        await client.aclose()
+    assert len(route.calls) == 1
+    assert client.answered_by == {}
+
+
+async def test_the_secondary_never_falls_back_to_itself_or_past_policy():
+    client = GatewayClient(PLATFORM_LLM_GATEWAY_URL, secondary_model="local/default")
+    assert client.secondary_for("claude-sonnet-5") == "local/default"
+    assert client.secondary_for("local/default") == ""
+    strict = GatewayClient(
+        PLATFORM_LLM_GATEWAY_URL,
+        secondary_model="local/default",
+        models=ModelPolicy(allowed=("claude-*",)),
+    )
+    assert strict.secondary_for("claude-sonnet-5") == "", "policy applies to the fallback too"
+
+
+def test_healthz_reports_which_model_answers(tmp_path):
+    env_ = RuntimeEnv(
+        llm_gateway_url=PLATFORM_LLM_GATEWAY_URL,
+        llm_model="claude-sonnet-5",
+        llm_secondary_model="local/default",
+        docs_path=str(tmp_path),
+    )
+    app = create_app(RuntimeConfig(), envcfg=env_, toolbox=MCPToolbox([]))
+    with TestClient(app) as http:
+        body = http.get("/healthz").json()
+    assert body["llm"]["primary"] == "claude-sonnet-5"
+    assert body["llm"]["secondary"] == "local/default"
+    assert body["llm"]["fallbacks"] == {"secondary_answered": 0, "secondary_failed": 0}
 
 
 async def test_an_unset_gateway_url_is_an_explicit_failure():

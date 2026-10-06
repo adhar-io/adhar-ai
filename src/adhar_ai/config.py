@@ -267,9 +267,20 @@ DEFAULT_MODELS = {
     # with the `local/` prefix to the in-cluster serving stack — vLLM behind the
     # llm-d router — so the runtime can be pointed at a private model with a
     # single env var (ADHAR_AI_LLM_PROVIDER=local) and no key at all. The name
-    # after the prefix must match what the model server was started with.
-    "local": "local/Qwen/Qwen2.5-0.5B-Instruct",
+    # after the prefix must match what the model server was started with:
+    # `local/default` is the alias BOTH llm-d profiles serve (ai/llm-d —
+    # Qwen2.5-0.5B on CPU, Qwen3.6-27B-FP8 on one GPU), so the runtime does
+    # not have to know which one the cluster installed. Name the real model
+    # (`local/Qwen/Qwen3.6-27B-FP8`) when it matters.
+    "local": "local/default",
 }
+
+#: The model the runtime falls back to when the primary fails — the
+#: self-hosted one. This is the DEFAULT for the platform manifests to set
+#: explicitly (ADHAR_AI_LLM_SECONDARY_MODEL); the code's own default is EMPTY,
+#: because a laptop running the bundled gateway has no llm-d to fall back to
+#: and a fallback that always fails is noise, not resilience.
+SECONDARY_MODEL_PLATFORM = DEFAULT_MODELS["local"]
 
 #: `claude` is the alias the platform manifests use for the Anthropic provider.
 PROVIDER_ALIASES = {
@@ -357,6 +368,13 @@ class RuntimeEnv:
     #: agentgateway the model name is the routing key, so a request without one
     #: falls through to the gateway's fallback rule rather than being routed.
     llm_model: str = ""
+    #: The SECONDARY model: named instead when a completion on the primary
+    #: fails after its retries (transport error, 5xx, an unkeyed gateway) —
+    #: never on a budget refusal or a policy refusal, which are decisions.
+    #: The platform sets `local/default`, the alias the self-hosted llm-d
+    #: profiles serve, so every agentic feature keeps answering while the
+    #: hosted provider is out. Empty disables the fallback.
+    llm_secondary_model: str = ""
     oidc_issuer_url: str = ""
     oidc_client_id: str = "adhar-ai"
     rag_dsn: str = ""
@@ -387,6 +405,7 @@ class RuntimeEnv:
                 default=PLATFORM_LLM_GATEWAY_URL,
             ).rstrip("/"),
             llm_model=env("ADHAR_AI_LLM_MODEL", "MODEL", default=DEFAULT_MODELS["anthropic"]),
+            llm_secondary_model=env("ADHAR_AI_LLM_SECONDARY_MODEL", "SECONDARY_MODEL", default=""),
             oidc_issuer_url=env("OIDC_ISSUER_URL"),
             oidc_client_id=env("OIDC_CLIENT_ID", default="adhar-ai"),
             rag_dsn=rag_dsn_from_env(),
