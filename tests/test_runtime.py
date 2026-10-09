@@ -806,3 +806,50 @@ def test_the_reference_section_tells_the_model_how_to_use_it():
     assert "## Reference material" in system
     assert "cite it by its name" in system and "never quote it at length" in system
     assert "## Grounding" not in system
+
+
+async def test_a_gateway_refusal_is_neither_retried_nor_handed_to_the_secondary():
+    """401/403 is about the caller, not the model. Before this: retrieval's
+    rewrite and rerank, sent without a bearer, were 401s that counted against
+    the model's breaker, and after eight of them every real completion failed
+    fast with CircuitOpen and an empty answer while the gateway was healthy."""
+    from adhar_ai.runtime.loop import GatewayRefused
+
+    with respx.mock:
+        route = respx.post(f"{PLATFORM_LLM_GATEWAY_URL}/chat/completions").mock(
+            return_value=httpx.Response(403, text="authorization failed")
+        )
+        client = GatewayClient(
+            PLATFORM_LLM_GATEWAY_URL,
+            default_model="claude-sonnet-5",
+            secondary_model="local/default",
+            retry=RetryPolicy(attempts=3, base_delay=0.0, timeout=5.0),
+        )
+        for _ in range(10):
+            with pytest.raises(GatewayRefused):
+                await client.chat([], None, tenant="t")
+        await client.aclose()
+    assert len(route.calls) == 10, "a refusal is neither retried nor sent to the secondary"
+    assert all(json.loads(c.request.content)["model"] == "claude-sonnet-5" for c in route.calls)
+    assert client.breakers.get("llm-gateway/claude-sonnet-5").state == "closed"
+
+
+async def test_a_run_that_fails_says_so_in_its_text():
+    """`error` rode in its own field with `text` empty, so every surface that
+    renders the answer showed nothing."""
+    from adhar_ai.runtime.loop import GatewayRefused
+
+    toolbox = FakeToolbox()
+    gateway = FakeGateway([GatewayRefused("403 authorization failed")])
+    result = await run(gateway, toolbox, Session(), "x")
+    assert result.kind == "error"
+    assert "refused this run's identity" in result.error
+    assert "AI gateway" in result.text and "403" in result.text
+
+
+async def test_the_step_limit_is_an_error_with_an_explanation():
+    toolbox = FakeToolbox()
+    gateway = FakeGateway([_tool_turn("app_status", {}) for _ in range(10)])
+    result = await run(gateway, toolbox, Session(max_steps=3), "x")
+    assert result.kind == "error"
+    assert "step limit" in result.text

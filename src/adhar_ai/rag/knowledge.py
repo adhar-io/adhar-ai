@@ -275,7 +275,9 @@ class KnowledgeBase:
 
     # -------------------------------------------------------------- search --
 
-    async def search(self, query: str, k: int = 5, kinds: tuple[str, ...] = ()) -> list[Hit]:
+    async def search(
+        self, query: str, k: int = 5, kinds: tuple[str, ...] = (), *, bearer: str = ""
+    ) -> list[Hit]:
         """Retrieve, optionally widened by a rewrite and narrowed by a rerank.
 
         The order is deliberate. The rewrite runs FIRST so both phrasings
@@ -287,14 +289,14 @@ class KnowledgeBase:
 
         hits = await self._retrieve(query, candidates, kinds)
         if self.rewriter is not None:
-            rewritten = await self.rewriter.rewrite(query)
+            rewritten = await self.rewriter.rewrite(query, bearer=bearer)
             if rewritten:
                 from .retrieval import fuse
 
                 hits = fuse(hits, await self._retrieve(rewritten, candidates, kinds), candidates)
 
         if self.reranker is not None and len(hits) > k:
-            hits = await self.reranker.rerank(query, hits, k)
+            hits = await self.reranker.rerank(query, hits, k, bearer=bearer)
         return hits[:k]
 
     async def _retrieve(self, query: str, k: int, kinds: tuple[str, ...]) -> list[Hit]:
@@ -359,7 +361,7 @@ class KnowledgeBase:
             return []
 
     async def grounding(
-        self, query: str, k: int = 5, kinds: tuple[str, ...] = ()
+        self, query: str, k: int = 5, kinds: tuple[str, ...] = (), *, bearer: str = ""
     ) -> list[str]:
         """Passages and topology together.
 
@@ -374,11 +376,11 @@ class KnowledgeBase:
         is true regardless of who is asking.
         """
         graph_blocks = await self.graph_context(query)
-        passages = [hit.as_grounding() for hit in await self.search(query, k, kinds)]
+        passages = [hit.as_grounding() for hit in await self.search(query, k, kinds, bearer=bearer)]
         return graph_blocks + passages
 
     async def grounding_with_ids(
-        self, query: str, k: int = 5, kinds: tuple[str, ...] = ()
+        self, query: str, k: int = 5, kinds: tuple[str, ...] = (), *, bearer: str = ""
     ) -> tuple[list[str], list[int]]:
         """Grounding blocks plus the chunk ids behind them.
 
@@ -386,7 +388,7 @@ class KnowledgeBase:
         unhelpful and the store knows exactly which retrieved chunks led to it.
         """
         graph_blocks = await self.graph_context(query)
-        hits = await self.search(query, k, kinds)
+        hits = await self.search(query, k, kinds, bearer=bearer)
         return (
             graph_blocks + [hit.as_grounding() for hit in hits],
             # Graph blocks carry no chunk id: they are derived on every refresh

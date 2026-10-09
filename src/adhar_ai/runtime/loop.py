@@ -312,7 +312,10 @@ class GatewayClient:
 
         try:
             payload = await self._complete(body, headers, chosen, tenant, max_tokens)
-        except (BudgetExhausted, ModelNotAllowed):
+        except (BudgetExhausted, ModelNotAllowed, GatewayRefused):
+            # Decisions about this caller. The secondary sits behind the same
+            # gateway and the same policy, so trying it would only add a
+            # second refusal to the log.
             raise
         except Exception as exc:
             fallback = self.secondary_for(chosen)
@@ -331,7 +334,7 @@ class GatewayClient:
             body["model"] = fallback
             try:
                 payload = await self._complete(body, headers, fallback, tenant, max_tokens)
-            except (BudgetExhausted, ModelNotAllowed):
+            except (BudgetExhausted, ModelNotAllowed, GatewayRefused):
                 self.fallbacks["secondary_failed"] += 1
                 metrics.record_fallback(chosen, fallback, "error")
                 raise
@@ -372,6 +375,12 @@ class GatewayClient:
                 # not congestion — retrying it spends the caller's remaining
                 # allowance on requests that are meant to be refused.
                 raise BudgetExhausted(resp.text)
+            if resp.status_code in (401, 403):
+                # Likewise a decision about the caller — who it is, what it
+                # may use — and not about the model. See GatewayRefused.
+                raise GatewayRefused(
+                    f"{resp.status_code} {resp.text.strip()[:200] or resp.reason_phrase}"
+                )
             resp.raise_for_status()
             return dict(resp.json())
 
@@ -392,6 +401,11 @@ class GatewayClient:
                 target=f"llm-gateway/{chosen}",
                 policy=self.retry,
                 breaker=self.breakers.get(f"llm-gateway/{chosen}"),
+                # Refusals must not open the breaker: the breaker is shared by
+                # every caller of this model, and one caller sent without a
+                # token (retrieval's rewrite and rerank were, until 2026-10-09)
+                # would otherwise take the model away from all of them.
+                ignore=(BudgetExhausted, ModelNotAllowed, GatewayRefused),
             )
             observed["outcome"] = "ok"
             usage = payload.get("usage") if isinstance(payload, dict) else None
@@ -402,6 +416,18 @@ class GatewayClient:
 
 class BudgetExhausted(RuntimeError):
     pass
+
+
+class GatewayRefused(RuntimeError):
+    """The gateway refused this CALLER (401/403): a decision, not an outage.
+
+    Never retried, never tried on the secondary model, never counted against a
+    circuit breaker. Measured on a live cluster before this existed: retrieval's
+    rewrite and rerank went out without a bearer, each 401 counted as a failure,
+    the breaker for every model opened after eight of them, and every real
+    completion then failed fast with `CircuitOpen` and an empty answer while the
+    gateway itself was healthy.
+    """
 
 
 class ModelNotAllowed(RuntimeError):
@@ -552,6 +578,10 @@ async def _steps(
         except BudgetExhausted as exc:
             result.kind, result.error = "budget_exhausted", str(exc)
             break
+        except GatewayRefused as exc:
+            result.kind = "error"
+            result.error = f"the AI gateway refused this run's identity ({exc})"
+            break
         except Exception as exc:
             result.kind, result.error = "error", f"{type(exc).__name__}: {exc}"
             break
@@ -629,9 +659,46 @@ async def _steps(
             break
     else:
         result.error = f"step limit ({session.max_steps}) reached without a final answer"
+        if not result.pull_requests:
+            # An "answer" with no text and an error is not an answer. Callers
+            # branch on `kind`; this one used to render as an empty success.
+            result.kind = "error"
 
     if result.pull_requests and result.kind == "answer":
         result.kind = "proposed"
+    if result.kind in ("error", "budget_exhausted") and not result.text.strip():
+        result.text = explain_outcome(result)
+
+
+def explain_outcome(result: AgentResult) -> str:
+    """A sentence a person can read when a run ends without an answer.
+
+    `error` travels in its own field and `text` was left empty, so every
+    surface that shows the answer — the console, Slack, the CLI — showed
+    nothing at all and the reason lived only in the runtime's log. The hint is
+    the part an operator can act on; the raw error stays so it can be searched.
+    """
+    error = result.error or "no reason was recorded"
+    if result.kind == "budget_exhausted":
+        return f"I stopped before answering: {error}."
+    low = f" {error.lower()} "
+    if "refused this run's identity" in low or " 401 " in low or " 403 " in low:
+        hint = (
+            "The runtime's identity is not allowed through the AI gateway — check the "
+            "agentgateway authorization policy and the Keycloak `adhar-ai` client."
+        )
+    elif "circuit is open" in low or "circuitopen" in low:
+        hint = (
+            "The model gateway has been failing and is paused for a moment; "
+            "try again in about 30 seconds."
+        )
+    elif "step limit" in low:
+        hint = "I used every step without reaching a final answer; a narrower question usually fixes this."
+    elif "neither an answer nor a tool call" in low:
+        hint = "The model returned nothing; a more capable model or a higher token limit usually fixes this."
+    else:
+        hint = "Try again; if it keeps happening, the runtime log has the full error."
+    return f"I couldn't complete this run: {error}. {hint}"
 
 
 async def _invoke(

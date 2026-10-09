@@ -50,6 +50,7 @@ class ScriptedGateway:
                 "tenant": tenant,
                 "model": model,
                 "max_tokens": max_tokens,
+                "bearer": bearer,
             }
         )
         reply = self.replies.pop(0)
@@ -265,3 +266,46 @@ def test_the_json_extractor_takes_the_earliest_value_not_the_first_array():
     payload = _first_json('Sure: {"query": "a b", "terms": ["x", "y"]} done')
     assert payload == {"query": "a b", "terms": ["x", "y"]}
     assert _first_json("ranking: [2, 0, 1]") == [2, 0, 1]
+
+
+# --------------------------------------- the run's token travels with retrieval
+
+
+async def test_rerank_and_rewrite_carry_the_runs_bearer():
+    """Both are completions through the same Strict-JWT gateway as the agent
+    loop. Sent without the token they are 401s — invisible here because the
+    fallback hides them, and fatal elsewhere because each one counted against
+    the model's shared circuit breaker (AWS cluster, 2026-10-09)."""
+    gateway = ScriptedGateway(["[1, 0]", '{"query": "argocd sync", "terms": ["degraded"]}'])
+    await GatewayReranker(gateway).rerank("q", [_hit(0), _hit(1)], 1, bearer="run-token")
+    await GatewayQueryRewriter(gateway).rewrite("why is the shop broken", bearer="run-token")
+    assert [r["bearer"] for r in gateway.requests] == ["run-token", "run-token"]
+
+
+async def test_search_threads_the_bearer_into_both_helpers():
+    gateway = ScriptedGateway(['{"query": "checkout Deployment OutOfSync", "terms": []}', "[1]"])
+    kb = _lexical_kb(CHUNKS)
+    kb.rewriter = GatewayQueryRewriter(gateway)
+    kb.reranker = GatewayReranker(gateway)
+    hits = await kb.search("ArgoCD sync", k=1, bearer="run-token")
+    assert hits, "the fused candidates were lost"
+    assert len(gateway.requests) == 2, "both the rewrite and the rerank should have run"
+    assert all(r["bearer"] == "run-token" for r in gateway.requests)
+
+
+async def test_grounding_passes_the_bearer_to_search(monkeypatch):
+    seen: list[str] = []
+
+    async def fake_search(self, query, k=5, kinds=(), *, bearer=""):
+        seen.append(bearer)
+        return []
+
+    async def no_graph(self, query):
+        return []
+
+    monkeypatch.setattr(KnowledgeBase, "search", fake_search)
+    monkeypatch.setattr(KnowledgeBase, "graph_context", no_graph)
+    kb = _lexical_kb(CHUNKS)
+    await kb.grounding_with_ids("q", bearer="run-token")
+    await kb.grounding("q", bearer="run-token")
+    assert seen == ["run-token", "run-token"]

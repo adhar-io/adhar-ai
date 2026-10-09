@@ -312,3 +312,25 @@ def test_the_refusal_says_what_is_permitted() -> None:
     assert "gpt-4o" in refusal
     assert "claude-*" in refusal
     assert "ADHAR_AI_ALLOWED_MODELS" in refusal
+
+
+async def test_a_refusal_is_not_an_outage():
+    """A 401/403/429 is a decision about the caller. Counted as a failure it
+    opens a breaker that every other caller of a healthy dependency shares —
+    which is how bearer-less retrieval calls took the LLM away from the agent
+    loop on a live cluster (2026-10-09)."""
+    from adhar_ai.resilience import CircuitBreaker, call_with_resilience
+
+    class Refused(RuntimeError):
+        pass
+
+    breaker = CircuitBreaker(target="llm-gateway/x", threshold=1)
+
+    async def refuse() -> str:
+        raise Refused("403 authorization failed")
+
+    for _ in range(3):
+        with pytest.raises(Refused):
+            await call_with_resilience(refuse, target="llm-gateway/x", breaker=breaker, ignore=(Refused,))
+    assert breaker.state == "closed"
+    assert breaker.failures == 0

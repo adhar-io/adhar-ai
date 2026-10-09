@@ -218,6 +218,11 @@ class Orchestrator:
         agent = self.registry.get(task.agent or GENERALIST)
         stage = self.ceiling_for(task, agent.name)
 
+        # Resolved BEFORE grounding, because grounding already spends
+        # completions: the query rewrite and the rerank go through the same
+        # gateway as the agent loop and need the same token.
+        run_bearer = bearer or await self._bearer()
+
         grounding: list[str] = []
         chunk_ids: list[int] = []
         if self.knowledge is not None:
@@ -227,7 +232,10 @@ class Orchestrator:
                 # documentation. An agent given the whole corpus is a
                 # generalist wearing a label.
                 grounding, chunk_ids = await self.knowledge.grounding_with_ids(
-                    task.prompt, k=self.config.rag_k, kinds=agent.knowledge_kinds
+                    task.prompt,
+                    k=self.config.rag_k,
+                    kinds=agent.knowledge_kinds,
+                    bearer=run_bearer,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.debug("grounding unavailable for task %s: %s", task.id, exc)
@@ -262,7 +270,7 @@ class Orchestrator:
             write_policy=self.config.write_policy,
             max_steps=self.config.max_steps,
             max_tool_calls=self.config.max_tool_calls_per_op,
-            bearer=bearer or await self._bearer(),
+            bearer=run_bearer,
             # A task raised from a Slack thread or a pull request continues the
             # conversation it came from; one raised by a chore has none.
             history=conversation.history() if conversation else [],

@@ -82,18 +82,25 @@ class Operator:
             bearer=principal.token if principal and principal.token else self.ctx.bearer,
         )
 
-    async def grounding(self, event: dict[str, Any]) -> list[str]:
+    async def grounding(
+        self, event: dict[str, Any], principal: Principal | None = None
+    ) -> list[str]:
         if self.ctx.retriever is None:
             return []
+        # The same token the run itself will present: retrieval's rewrite and
+        # rerank are completions too, and the gateway refuses them without it.
+        bearer = principal.token if principal and principal.token else self.ctx.bearer
         try:
-            return await self.ctx.retriever.grounding(self.prompt(event)[:2000], k=5)
+            return await self.ctx.retriever.grounding(
+                self.prompt(event)[:2000], k=5, bearer=bearer
+            )
         except Exception:  # noqa: BLE001 - an ungrounded finding beats no finding
             return []
 
     async def handle(
         self, event: dict[str, Any], principal: Principal | None = None
     ) -> Finding:
-        session = self.session(await self.grounding(event), principal)
+        session = self.session(await self.grounding(event, principal), principal)
         result: AgentResult = await run(
             self.ctx.gateway, self.ctx.toolbox, session, self.prompt(event), self.ctx.cfg
         )

@@ -141,7 +141,16 @@ def chunk_key(hit: Hit) -> str:
 
 
 class GatewayReranker:
-    """Orders candidates with the gateway model; falls back to their order."""
+    """Orders candidates with the gateway model; falls back to their order.
+
+    `bearer` is the RUN's token and is mandatory on the platform: agentgateway
+    runs `jwtAuthentication: Strict`, so a rerank sent without it is a 401.
+    That 401 used to be invisible here (the fallback to retrieval order hid
+    it) and very visible elsewhere — each one counted as a failure on the
+    model's circuit breaker, shared with the agent loop, and after eight of
+    them every real completion failed fast with `CircuitOpen` and an empty
+    answer while the gateway was healthy (AWS cluster, 2026-10-09).
+    """
 
     def __init__(self, gateway: Any, model: str = "", tenant: str = "adhar-ai:retrieval") -> None:
         self.gateway = gateway
@@ -150,7 +159,9 @@ class GatewayReranker:
         self.calls = 0
         self.failures = 0
 
-    async def rerank(self, question: str, hits: list[Hit], k: int) -> list[Hit]:
+    async def rerank(
+        self, question: str, hits: list[Hit], k: int, *, bearer: str = ""
+    ) -> list[Hit]:
         if len(hits) <= 1 or k <= 0:
             return hits[:k]
         lines = []
@@ -166,6 +177,7 @@ class GatewayReranker:
                 self.tenant,
                 model=self.model or None,
                 max_tokens=256,
+                bearer=bearer,
             )
             order = _first_json(_completion_text(response))
             if not isinstance(order, list):
@@ -205,7 +217,7 @@ class GatewayQueryRewriter:
         self.failures = 0
         self._cache: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
 
-    async def rewrite(self, question: str) -> str | None:
+    async def rewrite(self, question: str, *, bearer: str = "") -> str | None:
         key = " ".join(question.lower().split())
         cached = self._cache.get(key)
         if cached and time.monotonic() - cached[0] < REWRITE_TTL:
@@ -221,6 +233,7 @@ class GatewayQueryRewriter:
                 self.tenant,
                 model=self.model or None,
                 max_tokens=160,
+                bearer=bearer,
             )
             payload = _first_json(_completion_text(response))
             if isinstance(payload, dict):

@@ -167,12 +167,19 @@ async def call_with_resilience[T](
     target: str,
     policy: RetryPolicy | None = None,
     breaker: CircuitBreaker | None = None,
+    ignore: tuple[type[BaseException], ...] = (),
 ) -> T:
     """Run `operation`, retrying what is worth retrying.
 
     Raises the LAST exception when every attempt fails, not the first: the last
     one is the state the dependency was actually in when we gave up, which is
     what an operator reading the error needs.
+
+    `ignore` names exceptions that are decisions about the CALLER rather than
+    about the dependency's health — a budget refusal, a policy refusal, a
+    401/403. They are re-raised untouched, never retried, and never counted
+    against the breaker: a breaker that opens on them stops a healthy
+    dependency from serving every other caller.
     """
     policy = policy or RetryPolicy()
     if breaker is not None:
@@ -191,6 +198,8 @@ async def call_with_resilience[T](
             # breaker for a dependency that never misbehaved.
             raise
         except BaseException as exc:  # noqa: BLE001
+            if ignore and isinstance(exc, ignore):
+                raise
             last = exc
             if not is_retryable(exc) or attempt == policy.attempts - 1:
                 if breaker is not None:
