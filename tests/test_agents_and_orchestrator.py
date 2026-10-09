@@ -438,3 +438,26 @@ def test_every_agent_and_chore_tool_exists_in_the_contract():
     for chore in DEFAULT_CHORES:
         unknown = set(chore.tools) - names
         assert not unknown, f"chore {chore.name} declares unknown tools: {sorted(unknown)}"
+
+
+# ------------------------------------------------------------- the bearer --
+
+
+async def test_the_runs_bearer_reaches_grounding_and_the_model():
+    """One token for the whole run. Grounding spends completions too (the
+    query rewrite and the rerank), through the same Strict-JWT gateway as the
+    agent loop; sent without the token they were 401s that opened the model's
+    shared circuit breaker and every real completion then failed fast
+    (AWS cluster, 2026-10-09)."""
+    seen: dict[str, str] = {}
+
+    class Knowledge:
+        async def grounding_with_ids(self, query, k=5, kinds=(), *, bearer=""):
+            seen["grounding"] = bearer
+            return ["# a passage"], [1]
+
+    gateway = FakeGateway([_answer("ok")])
+    orchestrator = _orchestrator(gateway, knowledge=Knowledge())
+    await orchestrator.answer(Task(prompt="why is checkout down?"), bearer="run-token", persist=False)
+    assert seen["grounding"] == "run-token"
+    assert gateway.requests[-1]["bearer"] == "run-token"

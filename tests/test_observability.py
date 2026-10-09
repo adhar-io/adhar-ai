@@ -193,5 +193,12 @@ def test_every_dashboard_query_names_a_metric_that_exists() -> None:
 def test_every_dashboard_panel_explains_itself() -> None:
     config = yaml.safe_load(DASHBOARD.read_text())
     dashboard = json.loads(config["data"]["adhar-ai.json"])
-    undocumented = [p["title"] for p in dashboard["panels"] if not p.get("description")]
+    # Rows are headings that group panels; Grafana renders no description on
+    # them, so requiring one would only make the dashboard carry text nobody
+    # can see. Every panel that shows data still has to explain itself.
+    undocumented = [
+        p["title"]
+        for p in dashboard["panels"]
+        if p.get("type") != "row" and not p.get("description")
+    ]
     assert not undocumented, f"panels with no description: {undocumented}"

@@ -243,7 +243,9 @@ async def test_an_empty_model_turn_is_an_error_not_an_empty_answer():
     assert "neither an answer nor a tool call" in result.error
     assert "finish_reason=length" in result.error
     assert "raise limits.maxTokens" in result.error
-    assert result.text == ""
+    # The reason is also the TEXT: `error` rode in its own field with `text`
+    # empty, so every surface rendering the answer showed nothing at all.
+    assert "neither an answer nor a tool call" in result.text
 
 
 async def test_a_whitespace_only_answer_is_also_an_error():
@@ -839,9 +841,11 @@ async def test_a_run_that_fails_says_so_in_its_text():
     renders the answer showed nothing."""
     from adhar_ai.runtime.loop import GatewayRefused
 
-    toolbox = FakeToolbox()
-    gateway = FakeGateway([GatewayRefused("403 authorization failed")])
-    result = await run(gateway, toolbox, Session(), "x")
+    class RefusingGateway(FakeGateway):
+        async def chat(self, messages, tools, tenant, model=None, max_tokens=4096, bearer=""):
+            raise GatewayRefused("403 authorization failed")
+
+    result = await run(RefusingGateway([]), FakeToolbox(), Session(), "x")
     assert result.kind == "error"
     assert "refused this run's identity" in result.error
     assert "AI gateway" in result.text and "403" in result.text
