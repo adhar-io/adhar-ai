@@ -554,7 +554,7 @@ def test_chat_grounding_is_scoped_to_what_the_agent_should_read(runtime):
     asked: list[tuple] = []
 
     class Knowledge:
-        async def grounding_with_ids(self, query, k=5, kinds=()):
+        async def grounding_with_ids(self, query, k=5, kinds=(), *, bearer=""):
             asked.append((query, kinds))
             return ["# a passage"], [7]
 
