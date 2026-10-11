@@ -170,6 +170,9 @@ def _reindex(
             cli_path=environment.cli_path,
             gitea=platform_repositories(),
             table=cfg.rag_table,
+            vector_url=environment.vector_url,
+            vector_collection=environment.vector_collection,
+            vector_api_key=environment.vector_api_key,
             embedder=await load_embeddings(environment.llm_gateway_url),
         )
         if not await knowledge.prepare():

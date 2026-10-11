@@ -50,7 +50,17 @@ QUESTIONS: tuple[Question, ...] = (
     ),
     Question(
         ask="what database does keycloak use and where is its secret?",
-        expect=("security/keycloak: Cluster keycloak-db", "security/keycloak: what it deploys"),
+        # `Database keycloak-db` since 2026-10-11: the platform's databases are
+        # asked for through the control plane rather than declared as CNPG
+        # Clusters, so the section this question must retrieve was RENAMED. Both
+        # spellings are accepted — a question about what database Keycloak uses
+        # should not start failing because the platform changed how it asks for
+        # one, and a cluster still running the old manifests is a valid corpus.
+        expect=(
+            "security/keycloak: Database keycloak-db",
+            "security/keycloak: Cluster keycloak-db",
+            "security/keycloak: what it deploys",
+        ),
         kind="manifest",
         why=(
             "retrieved three unrelated package contracts; the manifest was a Go "

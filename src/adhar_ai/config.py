@@ -378,6 +378,21 @@ class RuntimeEnv:
     oidc_issuer_url: str = ""
     oidc_client_id: str = "adhar-ai"
     rag_dsn: str = ""
+    #: The vector store (Qdrant), which holds the embeddings since 2026-10-11.
+    #: Empty means no vector retrieval — the knowledge base then answers from
+    #: its in-process lexical index, which is a real degradation and not an
+    #: error: a platform without a vector store must still ground its answers.
+    vector_url: str = ""
+    vector_collection: str = "adhar_knowledge"
+    vector_api_key: str = ""
+    #: The knowledge graph (Neo4j). Empty keeps the graph on Postgres, which is
+    #: where it still lives until the Cypher backend lands — the env is wired by
+    #: the platform ahead of the code deliberately, so enabling it is a
+    #: deployment decision rather than a release.
+    graph_uri: str = ""
+    graph_database: str = "neo4j"
+    graph_username: str = ""
+    graph_password: str = ""
     docs_path: str = ""
     #: A checkout of the `adhar` repository. When set, the package, environment
     #: and CLI paths below default to its subdirectories, which is how a
@@ -409,6 +424,13 @@ class RuntimeEnv:
             oidc_issuer_url=env("OIDC_ISSUER_URL"),
             oidc_client_id=env("OIDC_CLIENT_ID", default="adhar-ai"),
             rag_dsn=rag_dsn_from_env(),
+            vector_url=env("ADHAR_AI_VECTOR_URL", default="").rstrip("/"),
+            vector_collection=env("ADHAR_AI_VECTOR_COLLECTION", default="adhar_knowledge"),
+            vector_api_key=env("ADHAR_AI_VECTOR_API_KEY", default=""),
+            graph_uri=env("ADHAR_AI_GRAPH_URI", default=""),
+            graph_database=env("ADHAR_AI_GRAPH_DATABASE", default="neo4j"),
+            graph_username=env("ADHAR_AI_GRAPH_USERNAME", default=""),
+            graph_password=env("ADHAR_AI_GRAPH_PASSWORD", default=""),
             docs_path=env(
                 "ADHAR_AI_DOCS_PATH", default=f"{repo}/docs" if repo else "/etc/adhar-ai/docs"
             ),

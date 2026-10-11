@@ -101,6 +101,9 @@ class KnowledgeBase:
         environments_path: str = "",
         cli_path: str = "",
         gitea: Any = None,
+        vector_url: str = "",
+        vector_collection: str = "adhar_knowledge",
+        vector_api_key: str = "",
     ) -> KnowledgeBase:
         """Assemble the sources this runtime can read.
 
@@ -113,7 +116,18 @@ class KnowledgeBase:
         from .platform_sources import CliSource, EnvironmentSource, ManifestsSource
         from .trees import tree_for
 
-        store = KnowledgeStore(dsn, table=table)
+        # The vector store, when the platform has composed one. pgvector stays
+        # as the fallback rather than being deleted: a cluster that has not
+        # enabled the Vector should keep the retrieval it had, and the two
+        # implement the same interface precisely so this choice is a one-liner.
+        if vector_url:
+            from .vector_store import QdrantKnowledgeStore
+
+            store: Any = QdrantKnowledgeStore(
+                vector_url, collection=vector_collection, api_key=vector_api_key
+            )
+        else:
+            store = KnowledgeStore(dsn, table=table)
         notes = NotesSource(dsn, table=notes_table) if dsn else None
         graph = KnowledgeGraph(dsn) if dsn else None
 

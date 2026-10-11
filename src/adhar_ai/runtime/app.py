@@ -205,6 +205,9 @@ def create_app(
             # read. A checkout on disk wins where one exists.
             gitea=platform_repositories(),
             table=config.rag_table,
+            vector_url=environment.vector_url,
+            vector_collection=environment.vector_collection,
+            vector_api_key=environment.vector_api_key,
             toolbox=app.state.toolbox,
             findings=None,  # wired below, once the finding store exists
         )
