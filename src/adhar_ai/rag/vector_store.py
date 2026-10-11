@@ -269,6 +269,7 @@ class QdrantKnowledgeStore:
                 if stale and vectors:
                     points = []
                     for chunk, vector in zip(stale, vectors, strict=False):
+                        prior = existing.get(chunk.chunk_index) or {}
                         points.append(
                             {
                                 "id": point_id(doc.doc_id, chunk.chunk_index),
@@ -293,8 +294,8 @@ class QdrantKnowledgeStore:
                                     # Feedback counters live on the point so a
                                     # vote survives a re-ingest of unchanged
                                     # content.
-                                    "helpful": int((existing.get(chunk.chunk_index) or {}).get("helpful", 0)),
-                                    "unhelpful": int((existing.get(chunk.chunk_index) or {}).get("unhelpful", 0)),
+                                    "helpful": int(prior.get("helpful", 0)),
+                                    "unhelpful": int(prior.get("unhelpful", 0)),
                                 },
                             }
                         )
@@ -307,8 +308,11 @@ class QdrantKnowledgeStore:
 
                 # The tail: a document that got SHORTER leaves points behind,
                 # and an orphaned chunk is citable forever.
+                fresh = set(fresh_ids)
                 orphans = [
-                    point_id(doc.doc_id, idx) for idx in existing if point_id(doc.doc_id, idx) not in set(fresh_ids)
+                    point_id(doc.doc_id, idx)
+                    for idx in existing
+                    if point_id(doc.doc_id, idx) not in fresh
                 ]
                 if orphans:
                     await self._call(

@@ -77,8 +77,10 @@ class FakeQdrant:
                 origin = flt["must"][0]["match"]["value"]
                 keep = set(flt["must_not"][0]["match"]["any"])
                 for pid in [
-                    pid for pid, v in self.points.items()
-                    if v["payload"].get("origin") == origin and v["payload"].get("doc_id") not in keep
+                    pid
+                    for pid, v in self.points.items()
+                    if v["payload"].get("origin") == origin
+                    and v["payload"].get("doc_id") not in keep
                 ]:
                     self.points.pop(pid)
             return httpx.Response(200, json={"result": {"status": "completed"}})
@@ -284,9 +286,12 @@ async def test_a_new_embedding_model_re_embeds_unchanged_content():
         model = "nomic-embed-text"
 
     new = Other()
-    report = await store.ingest("docs", [doc("docs/a.md")], {"docs/a.md": [chunk(0, "a")]}, embedder=new)
+    report = await store.ingest(
+        "docs", [doc("docs/a.md")], {"docs/a.md": [chunk(0, "a")]}, embedder=new
+    )
     assert report.chunks_written == 1, "a model change must not reuse the old vectors"
-    assert fake.points[point_id("docs/a.md", 0)]["payload"]["embed_model"].endswith("nomic-embed-text")
+    payload = fake.points[point_id("docs/a.md", 0)]["payload"]
+    assert payload["embed_model"].endswith("nomic-embed-text")
 
 
 @pytest.mark.asyncio
@@ -298,7 +303,10 @@ async def test_search_filters_by_kind_and_weights_the_result():
     await store.ingest(
         "docs",
         [doc("docs/a.md", kind="adr"), doc("docs/b.md", kind="doc")],
-        {"docs/a.md": [chunk(0, "alpha", kind="adr")], "docs/b.md": [chunk(0, "beta", doc_id="docs/b.md")]},
+        {
+            "docs/a.md": [chunk(0, "alpha", kind="adr")],
+            "docs/b.md": [chunk(0, "beta", doc_id="docs/b.md")],
+        },
         embedder=emb,
     )
     hits = await store.search("alpha", embedder=emb, k=5)

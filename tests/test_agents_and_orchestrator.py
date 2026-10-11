@@ -458,6 +458,8 @@ async def test_the_runs_bearer_reaches_grounding_and_the_model():
 
     gateway = FakeGateway([_answer("ok")])
     orchestrator = _orchestrator(gateway, knowledge=Knowledge())
-    await orchestrator.answer(Task(prompt="why is checkout down?"), bearer="run-token", persist=False)
+    await orchestrator.answer(
+        Task(prompt="why is checkout down?"), bearer="run-token", persist=False
+    )
     assert seen["grounding"] == "run-token"
     assert gateway.requests[-1]["bearer"] == "run-token"

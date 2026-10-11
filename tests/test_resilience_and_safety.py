@@ -331,6 +331,8 @@ async def test_a_refusal_is_not_an_outage():
 
     for _ in range(3):
         with pytest.raises(Refused):
-            await call_with_resilience(refuse, target="llm-gateway/x", breaker=breaker, ignore=(Refused,))
+            await call_with_resilience(
+                refuse, target="llm-gateway/x", breaker=breaker, ignore=(Refused,)
+            )
     assert breaker.state == "closed"
     assert breaker.failures == 0

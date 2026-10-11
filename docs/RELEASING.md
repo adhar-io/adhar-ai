@@ -116,6 +116,17 @@ are documentation, not deployment.
 
 ## 6. If something goes wrong
 
+- **The script refused on a gate, and `main` had looked fine.** `images` and
+  `ci` are independent workflows and `images` does not depend on `ci`, so a
+  commit whose lint or tests fail still builds, signs and publishes `:latest` —
+  the registry looks healthy while `main` is not. CI's steps are also
+  sequential: a lint failure skips type-check, tests, the contract snapshot and
+  the end-to-end run, so one over-long line hides every gate behind it. This is
+  real history — `v0.3.3` was followed by three commits with a failing `ci`
+  that nothing surfaced until the next release refused. Nothing is broken by
+  the refusal (the tree is restored), but fix it as a normal commit on `main`,
+  let `ci` go green, and release from there. `./hack/release.sh --dry-run` runs
+  the identical set at any time.
 - **`images.yml` failed after the tag was pushed.** Fix on `main`, then
   re-run the workflow for the tag from the Actions page. The tag itself is
   correct; only the build failed.

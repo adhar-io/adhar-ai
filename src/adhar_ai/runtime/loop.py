@@ -693,9 +693,15 @@ def explain_outcome(result: AgentResult) -> str:
             "try again in about 30 seconds."
         )
     elif "step limit" in low:
-        hint = "I used every step without reaching a final answer; a narrower question usually fixes this."
+        hint = (
+            "I used every step without reaching a final answer; "
+            "a narrower question usually fixes this."
+        )
     elif "neither an answer nor a tool call" in low:
-        hint = "The model returned nothing; a more capable model or a higher token limit usually fixes this."
+        hint = (
+            "The model returned nothing; a more capable model or a higher "
+            "token limit usually fixes this."
+        )
     else:
         hint = "Try again; if it keeps happening, the runtime log has the full error."
     return f"I couldn't complete this run: {error}. {hint}"

@@ -476,6 +476,44 @@ Every setting has an `ADHAR_AI_`-prefixed name and an unprefixed fallback, which
 is how the platform manifests inject them. [`src/adhar_ai/config.py`](src/adhar_ai/config.py)
 is the list, and [docs/OPERATIONS.md](docs/OPERATIONS.md) is the annotated version.
 
+### Cutting a release
+
+```bash
+./hack/release.sh                      # the next PATCH: X.Y.Z -> X.Y.(Z+1)
+./hack/release.sh --dry-run            # the same checks, nothing written
+./hack/release.sh 0.4.0                # a minor or major bump, named explicitly
+```
+
+One command publishes a version. It refuses unless you are on `main` with a
+clean tree in sync with `origin`; writes the new version into every place that
+states one (`pyproject.toml`, `src/adhar_ai/__init__.py`, the README badge,
+`uv.lock`); and then runs **the same gates CI runs** — `ruff`, `mypy`, the
+`contract/tools.json` snapshot, `pytest`. Only if all of them pass does it
+commit, tag and push. Any failure restores the tree, so a refused release leaves
+nothing behind — including the version bump it had already written.
+
+**A red `ci` on `main` is invisible until you try to release.** `images` and
+`ci` are separate workflows, and `images` does not depend on `ci`: a commit
+whose lint or tests fail still builds, signs and publishes `:latest`, so the
+registry looks healthy while `main` is not. Worse, CI's steps are sequential —
+a lint failure *skips* type-check, tests, the contract snapshot and the
+end-to-end run, so one over-long line hides every other gate. That is how
+`v0.3.3` was followed by three commits with a failing `ci` that nothing
+surfaced until `hack/release.sh` refused to cut `0.3.4`. The habit that avoids
+it: run the gates above (or `./hack/release.sh --dry-run`, which is the same
+set) **before** pushing, and treat `ci` on `main` as the release gate it is.
+
+After the tag, `images.yml` builds and signs the eight images and `release.yml`
+then publishes the GitHub Release with the tool contract and the SBOM. The
+platform tracks `:latest`, so there are no manifest changes to make — roll the
+pods, and `/healthz` reports the version and commit now running:
+
+```bash
+kubectl rollout restart deployment -n adhar-system -l adhar.io/origin=adhar-ai
+```
+
+👉 Full detail: **[docs/RELEASING.md](docs/RELEASING.md)**
+
 ---
 
 ## 🏗️ How the platform consumes this
