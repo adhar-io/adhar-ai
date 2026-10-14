@@ -1,4 +1,4 @@
-"""MCP client: mounts the seven domain servers as one tool namespace.
+"""MCP client: mounts the eight domain servers as one tool namespace.
 
 Uses the official `mcp` Python SDK's streamable-HTTP client against each
 server's `/mcp` endpoint — the same transport an external agent (Claude Code, an

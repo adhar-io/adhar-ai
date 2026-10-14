@@ -33,11 +33,13 @@ from typing import Any
 
 import yaml
 
+from ..config import DOMAINS
+
 LADDER = ("read-only", "suggest", "approve-to-apply", "scoped")
 
 DEFAULT_MCP_SERVERS = {
     domain: f"http://adhar-ai-mcp-{domain}.adhar-system.svc.cluster.local:8080"
-    for domain in ("cluster", "gitops", "provision", "observability", "security", "cost", "catalog")
+    for domain in DOMAINS
 }
 
 

@@ -5,7 +5,7 @@
 #   docker compose up --build
 #   curl localhost:8080/healthz              # runtime
 #   curl localhost:8081/healthz              # gateway
-#   curl localhost:8090/healthz              # mcp-cluster
+#   curl localhost:8090/healthz              # mcp-cluster (…8097 mcp-delivery)
 #
 # Backend URLs default to a port-forwarded Adhar cluster on the host; override
 # them in a .env file. Any backend left unset makes its tools report
@@ -130,6 +130,15 @@ services:
       GITEA_WRITE_ENABLED: ${GITEA_WRITE_ENABLED:-false}
       GITEA_WRITE_REPOS: packages,environments
       GITEA_BOT_TOKEN: ${GITEA_BOT_TOKEN:-}
+
+  # The commit-to-revision path. Read-only: no Gitea write credential at all.
+  mcp-delivery:
+    <<: *image
+    command: ["mcp", "--domain=delivery", "--listen=:8080"]
+    ports: ["8097:8080"]
+    environment:
+      <<: *mcp-env
+      MCP_DOMAIN: delivery
 
   runtime:
     <<: *image

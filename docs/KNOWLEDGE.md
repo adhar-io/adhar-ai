@@ -199,7 +199,7 @@ answer needs is bounded, not a graph workload.
 | `packages` | every package in the platform stack | `depends_on` between them |
 | `argocd` | ArgoCD Applications and the packages they ship | `deploys` |
 | `workloads` | pods in the platform namespace, plus the components and teams that own them | `runs_in`, `owns` |
-| `tools` | the seven MCP domains and their 29 tools | `serves` |
+| `tools` | the eight MCP domains and their 35 tools | `serves` |
 
 Each source is refreshed independently and **replaces only its own origin**. A
 package refresh that wiped the workload nodes would empty the graph between
@@ -383,7 +383,7 @@ true regardless of who is asking.
 ## 6b. The graded question set
 
 `adhar_ai.rag.benchmark` holds questions with the source a correct retrieval
-must surface — the seven that exposed the gap, and the rows added since. It
+must surface — the eight that exposed the gap, and the rows added since. It
 grades **retrieval, not the model**: a question passes when an expected source
 is in the top results, which is deterministic and needs no key.
 

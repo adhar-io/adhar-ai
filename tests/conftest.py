@@ -23,6 +23,16 @@ TEMPO_URL = "http://tempo.adhar-system.svc.cluster.local:3100"
 OPENCOST_URL = "http://opencost.adhar-system.svc.cluster.local:9003"
 
 
+class FakeApiError(Exception):
+    """What `kubernetes.client.ApiException` looks like to code that duck-types
+    it — a `.status` and a message."""
+
+    def __init__(self, status: int, message: str) -> None:
+        self.status = status
+        self.reason = message
+        super().__init__(message)
+
+
 class FakeKubeClient:
     """In-memory stand-in for the read-only Kubernetes client."""
 
@@ -70,6 +80,13 @@ class FakeKubeClient:
             }
         ]
         self.custom: dict[str, list[dict[str, Any]]] = {}
+        #: Plurals whose CRD is NOT installed. Reading one raises the way the
+        #: Kubernetes client does (404), which is how the optional-package
+        #: paths in mcp/delivery.py are exercised.
+        self.absent: set[str] = set()
+        #: Plurals the ServiceAccount may not read: a 403, which must NOT be
+        #: mistaken for "this kind does not exist".
+        self.forbidden: set[str] = set()
 
     def list_pods(self, namespace=None, label_selector=None):
         rows = [p for p in self.pods if namespace is None or p["namespace"] == namespace]
@@ -94,7 +111,22 @@ class FakeKubeClient:
         return [w for w in self.workloads if namespace is None or w["namespace"] == namespace]
 
     def list_custom(self, group, version, plural, namespace=None):
-        return list(self.custom.get(plural, []))
+        if plural in self.absent:
+            raise FakeApiError(
+                404, f"404 the server could not find the requested resource ({plural})"
+            )
+        if plural in self.forbidden:
+            raise FakeApiError(403, f"{plural}.{group} is forbidden")
+        rows = list(self.custom.get(plural, []))
+        if namespace:
+            # A fixture without a namespace matches any: the older fixtures in
+            # this suite predate namespace filtering here.
+            rows = [
+                r
+                for r in rows
+                if ((r.get("metadata") or {}).get("namespace") or namespace) == namespace
+            ]
+        return rows
 
     def get_custom(self, group, version, plural, name, namespace=None):
         for item in self.custom.get(plural, []):

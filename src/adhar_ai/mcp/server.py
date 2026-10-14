@@ -59,7 +59,7 @@ def build_server(cfg: MCPConfig) -> Any:
     async def prometheus_metrics(_request: Request) -> Response:
         """Each domain server exports its own tool-call counters, so a slow or
         failing backend is attributable to the domain that fronts it rather
-        than averaged away across all seven."""
+        than averaged away across all eight."""
         return Response(
             content=metrics.render_metrics(), media_type=METRICS_CONTENT_TYPE
         )

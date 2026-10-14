@@ -128,5 +128,31 @@
       "name": "scaffold",
       "access": "write"
     }
+  ],
+  "delivery": [
+    {
+      "name": "pipeline_runs",
+      "access": "read"
+    },
+    {
+      "name": "pipeline_run",
+      "access": "read"
+    },
+    {
+      "name": "builds",
+      "access": "read"
+    },
+    {
+      "name": "build_logs",
+      "access": "read"
+    },
+    {
+      "name": "promotions",
+      "access": "read"
+    },
+    {
+      "name": "previews",
+      "access": "read"
+    }
   ]
 }

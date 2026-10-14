@@ -41,7 +41,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # One build, eight names. The platform package's Deployments reference a
+      # One build, nine names. The platform package's Deployments reference a
       # distinct image name per role, but the role comes from the container
       # `args`, so the same artifact serves all of them.
       #
@@ -52,7 +52,7 @@ jobs:
         id: tags
         run: |
           NAMES="adhar-ai-runtime"
-          for d in cluster gitops provision observability security cost catalog; do
+          for d in cluster gitops provision observability security cost catalog delivery; do
             NAMES="$NAMES adhar-ai-mcp-$d"
           done
 
@@ -127,7 +127,7 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          # All eight names are the same artifact, so one SBOM describes them all.
+          # All nine names are the same artifact, so one SBOM describes them all.
           syft "${REGISTRY}/${OWNER}/adhar-ai-runtime@${DIGEST}" \
             -o spdx-json=sbom.spdx.json
           for n in ${{ steps.tags.outputs.names }}; do

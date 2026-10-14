@@ -1,7 +1,7 @@
 # 🧰 Tool Reference
 
-Adhar AI exposes **29 tools across 7 domains**. Each domain is its own MCP
-server — one container image, seven Deployments, differing only by
+Adhar AI exposes **35 tools across 8 domains**. Each domain is its own MCP
+server — one container image, eight Deployments, differing only by
 `ADHAR_AI_MCP_DOMAIN`.
 
 | Domain | Server name | Read tools | Write tools |
@@ -13,6 +13,7 @@ server — one container image, seven Deployments, differing only by
 | `security` | `adhar-security` | `findings`, `policy_explain`, `posture` | `propose_exception` |
 | `cost` | `adhar-cost` | `cost_by`, `budget_status`, `showback` | — |
 | `catalog` | `adhar-catalog` | `search_packages`, `template_params` | `scaffold` |
+| `delivery` | `adhar-delivery` | `pipeline_runs`, `pipeline_run`, `builds`, `build_logs`, `promotions`, `previews` | — |
 
 **23 reads, 4 writes.**
 
@@ -38,7 +39,7 @@ uv run adhar-ai tools                                   # JSON: {domain: [{name,
 uv run adhar-ai tools | diff -u contract/tools.json -   # CI fails on any drift
 ```
 
-`adhar-ai tools` builds each of the seven servers in-process and lists their
+`adhar-ai tools` builds each of the eight servers in-process and lists their
 tools, so it needs no cluster and no credentials.
 
 ---
@@ -51,14 +52,14 @@ client shares.
 
 ### The federated endpoint
 
-In the platform, the seven servers sit behind
+In the platform, the eight servers sit behind
 [agentgateway](https://agentgateway.dev) as **one** MCP endpoint:
 
 ```
 https://mcp.<host>/mcp
 ```
 
-agentgateway multiplexes all seven tool lists, validates the Keycloak token once
+agentgateway multiplexes all eight tool lists, validates the Keycloak token once
 in front of them, and authorizes per tool — read tools require
 `platform-developer`, the PR-opening tools require `platform-admin`.
 
@@ -104,9 +105,9 @@ curl -s localhost:8080/healthz
 
 `/readyz` returns `{"status": "ok", "domain": "cluster"}`.
 
-`docker compose up` brings up all seven on fixed host ports: `8090` cluster,
+`docker compose up` brings up all eight on fixed host ports: `8090` cluster,
 `8091` gitops, `8092` provision, `8093` observability, `8094` security, `8095`
-cost, `8096` catalog.
+cost, `8096` catalog, `8097` delivery.
 
 ### Transport security
 
@@ -992,6 +993,177 @@ ArgoCD force-fails and drops the database.
   ]
 }
 ```
+
+---
+
+## 🚚 delivery
+
+**Backend:** the Kubernetes API, read-only, for four optional packages'
+custom resources:
+
+| Thing | API | Package |
+|---|---|---|
+| `PipelineRun`, `TaskRun` | `tekton.dev/v1` | `application/tekton` |
+| `Image`, `Build` | `kpack.io/v1alpha2` | `application/buildpack` |
+| `Promotion` | `kargo.akuity.io/v1alpha1` | `application/kargo` |
+| preview environments | `argoproj.io/v1alpha1` Applications labelled `adhar.io/preview` | `application/adhar-preview-environments` |
+
+**Not installed:** every one of those packages is optional, and a platform
+without Tekton is not a broken platform. A missing CRD returns
+`{"installed": false, "note": "pipelineruns (tekton.dev/v1) is not installed on
+this platform. Enable the application/tekton package to use this tool."}` with
+an empty list — a fact the model can tell apart from "installed, nothing
+failing". A **403** is re-raised instead: an RBAC refusal must never look like a
+healthy, empty cluster.
+
+**Why this domain exists.** `cluster` can say a Deployment is unhealthy,
+`gitops` that an Application is OutOfSync, `security` that a policy refused an
+image — none of them can say why the build that should have produced that image
+failed. That is the most common question a developer asks, and it used to have
+no answer.
+
+This server has **no write tool**. Fixing a build means changing a repository,
+and that path exists exactly once, in `gitops.propose_change`.
+
+### `pipeline_runs`
+
+| Argument | Type | Default | Meaning |
+|---|---|---|---|
+| `namespace` | `str \| None` | `None` | One namespace; omit for cluster-wide |
+| `repo` | `str \| None` | `None` | Substring-matched against the run name and the repo label |
+| `only_failed` | `bool` | `False` | Return just the runs that did not succeed |
+| `limit` | `int` | `20` | Runs returned; `counts` always covers everything found |
+
+```json
+{
+  "installed": true,
+  "counts": {"total": 2, "failed": 1, "running": 0, "succeeded": 1},
+  "runs": [
+    {"name": "checkout-build-xk2p9", "namespace": "team-web",
+     "pipeline": "build-and-push", "outcome": "Failed", "reason": "Failed",
+     "started": "2026-10-14T09:00:00Z", "duration_seconds": 270.0,
+     "repo": "checkout", "revision": "abc1234", "tasks": 2}
+  ]
+}
+```
+
+`counts` describes everything matched, **before** `only_failed` and `limit` are
+applied, so "1 of 2 runs failed" survives the filter.
+
+### `pipeline_run`
+
+| Argument | Type | Default | Meaning |
+|---|---|---|---|
+| `name` | `str` | required | The PipelineRun, as `pipeline_runs` reports it |
+| `namespace` | `str` | required | Where it ran |
+
+Resolves the run's TaskRuns (Tekton labels each with `tekton.dev/pipelineRun`)
+and lifts the failure to the top level as `cause`, because a model handed twelve
+task rows sometimes reports the wrong one:
+
+```json
+{
+  "installed": true, "found": true, "outcome": "Failed",
+  "task_runs": [
+    {"name": "…-fetch", "task": "fetch", "outcome": "Succeeded", "duration_seconds": 20.0},
+    {"name": "…-compile", "task": "compile", "outcome": "Failed",
+     "failed_step": {"step": "go-build", "container": "step-go-build", "exit_code": 2}}
+  ],
+  "cause": {"task": "compile", "task_run": "…-compile", "step": "go-build",
+            "exit_code": 2, "pod": "…-compile-pod",
+            "logs_with": "build_logs(namespace, name=<task_run>, step=<step>)"}
+}
+```
+
+A name that does not exist returns `{"found": false, "note": "…"}` rather than
+an error — it is an ordinary outcome of a stale run name.
+
+### `builds`
+
+| Argument | Type | Default | Meaning |
+|---|---|---|---|
+| `namespace` | `str \| None` | `None` | One namespace; omit for cluster-wide |
+| `image` | `str \| None` | `None` | Substring-matched against the build and its kpack `Image` |
+| `only_failed` | `bool` | `False` | Just the builds that did not succeed |
+| `limit` | `int` | `20` | Builds returned |
+
+kpack runs the buildpack lifecycle as one container per phase and reports their
+states positionally, so the failing phase is named rather than numbered:
+
+```json
+{
+  "installed": true,
+  "counts": {"total": 1, "failed": 1, "building": 0},
+  "images": {"checkout": {"latest_image": "harbor…/checkout@sha256:dead",
+                          "latest_build": "checkout-build-4-k9vd2",
+                          "build_reason": "COMMIT", "ready": false}},
+  "builds": [
+    {"name": "checkout-build-4-k9vd2", "outcome": "Failed",
+     "steps_completed": ["prepare", "analyze", "detect", "restore", "build"],
+     "failed_step": {"step": "build", "exit_code": 1},
+     "image_resource": "checkout", "is_latest": true, "build_reason": "COMMIT",
+     "pod": "checkout-build-4-k9vd2-build-pod"}
+  ]
+}
+```
+
+`is_latest` answers "is this the build my merge triggered, or an older one".
+
+### `build_logs`
+
+| Argument | Type | Default | Meaning |
+|---|---|---|---|
+| `namespace` | `str` | required | Where the build ran |
+| `name` | `str` | required | A TaskRun, a kpack Build, **or** a pod |
+| `step` | `str \| None` | `None` | A step/phase; omit to get the failing one |
+| `tail_lines` | `int` | `120` | Lines from the end of that container |
+
+The tool the domain exists for. Each step of a build is a container in the
+build's pod, and both TaskRuns and kpack Builds record that pod — so this
+resolves name → pod → container and tails it. **With no `step` it picks the
+failing step**, which is the one wanted in every case where someone is reading
+build logs at all. Tekton containers are `step-<name>`; a bare `deps` is
+accepted and prefixed.
+
+```json
+{"found": true, "via": "taskrun", "pod": "…-compile-pod",
+ "container": "step-go-build", "lines": ["go: downloading…", "main.go:12: undefined: Foo"]}
+```
+
+A TaskRun that never scheduled a pod returns `{"found": false, "note": "…"}`:
+there are no logs, and saying so beats tailing something else.
+
+### `promotions`
+
+| Argument | Type | Default | Meaning |
+|---|---|---|---|
+| `namespace` | `str \| None` | `None` | The Kargo project namespace |
+| `stage` | `str \| None` | `None` | One stage (`dev`, `test`, `prod`, …) |
+| `limit` | `int` | `20` | Promotions returned |
+
+`gitops.sync_status` says what a cluster is running; this says what was being
+promoted into it. A stuck promotion and an OutOfSync Application are different
+problems with different fixes. Rows carry `stage`, `freight`, `phase` and the
+promotion's message.
+
+### `previews`
+
+| Argument | Type | Default | Meaning |
+|---|---|---|---|
+| `repo` | `str \| None` | `None` | One repository |
+
+```json
+{"installed": true, "count": 1,
+ "previews": [{"application": "checkout-pr-42", "repo": "checkout",
+               "pull_request": "42", "url": "https://checkout-pr-42.adhar.localtest.me:8443",
+               "namespace": "preview-checkout-42", "head_sha": "abc1234",
+               "sync": "Synced", "health": "Degraded"}],
+ "unhealthy": [{"application": "checkout-pr-42", "…": "…"}]}
+```
+
+Answers "where is my pull request deployed" by PR number instead of by naming
+convention. `unhealthy` is the set worth surfacing: Synced but Degraded means it
+deployed and is broken.
 
 ---
 

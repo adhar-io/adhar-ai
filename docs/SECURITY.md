@@ -15,7 +15,7 @@ claims a control the code does not implement, this document corrects it.
 
 > **Read tools read. Write tools open a pull request. Nothing applies to a cluster.**
 
-There are 29 tools across seven domains. Four of them are writes —
+There are 35 tools across eight domains. Four of them are writes —
 `propose_change`, `propose_xr`, `propose_exception`, `scaffold` — and all four do
 exactly one thing: create a branch in Gitea, commit files to it, and open a pull
 request. A human merges; ArgoCD reconciles. The agent's authority is a
@@ -272,7 +272,7 @@ Rotate it like an admin credential.
 
 ### On the MCP surface: agentgateway
 
-In the platform, all seven MCP servers sit behind agentgateway, which validates
+In the platform, all eight MCP servers sit behind agentgateway, which validates
 the Keycloak JWT once for all of them
 (`platform/stack/packages/ai/agentgateway/manifests/security.yaml`):
 
@@ -491,8 +491,8 @@ servers, and `guard_write` refuses every write when it is unset.
 
 ## 📦 Supply chain
 
-`.github/workflows/images.yml` builds one image and publishes it under eight names
-(`adhar-ai-runtime` plus `adhar-ai-mcp-<domain>` for the seven domains) — the role
+`.github/workflows/images.yml` builds one image and publishes it under nine names
+(`adhar-ai-runtime` plus `adhar-ai-mcp-<domain>` for the eight domains) — the role
 comes from the container `args`, so one artifact serves all of them. There is
 deliberately no `adhar-ai-gateway` image; ADR-0025 retired that role.
 
@@ -500,7 +500,7 @@ deliberately no `adhar-ai-gateway` image; ADR-0025 retired that role.
 |---|---|
 | **Keyless signing** | `permissions: id-token: write` gives the workflow an OIDC token that identifies it as the signer; `cosign sign` runs once per published name |
 | **Signed by digest** | Signing uses `${name}@${digest}`, never a tag. A tag signature would be stranded the next time `latest` moves, and the digest is what an admission controller actually verifies |
-| **SBOM attestation** | `syft` produces one SPDX JSON (all eight names are the same artifact) and `cosign attest --type spdxjson` attaches it to each |
+| **SBOM attestation** | `syft` produces one SPDX JSON (all nine names are the same artifact) and `cosign attest --type spdxjson` attaches it to each |
 | **Multi-arch** | `platforms: linux/amd64,linux/arm64` |
 | **Verification in CI** | `cosign verify --certificate-identity-regexp "^https://github.com/<repo>/" --certificate-oidc-issuer https://token.actions.githubusercontent.com` — the workflow proves its own signature is discoverable |
 | **Smoke test** | Runs the roles that actually ship: `adhar-ai tools` must load every domain's inventory; one MCP server must come up and answer `/healthz`; and it must answer an MCP `initialize` carrying the **in-cluster Host headers** it really receives (`adhar-ai-mcp-cluster.adhar-system.svc.cluster.local:8080` and a Pod IP), which a localhost health probe cannot catch |

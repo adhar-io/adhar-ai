@@ -32,6 +32,16 @@ EXPECTED = {
     "security": {"findings", "policy_explain", "posture", "propose_exception"},
     "cost": {"cost_by", "budget_status", "showback"},
     "catalog": {"search_packages", "template_params", "scaffold"},
+    # The commit-to-revision path. Read-only on purpose: fixing a build means
+    # changing a repository, and `gitops.propose_change` is that path.
+    "delivery": {
+        "pipeline_runs",
+        "pipeline_run",
+        "builds",
+        "build_logs",
+        "promotions",
+        "previews",
+    },
 }
 
 EXPECTED_WRITES = {"propose_change", "propose_xr", "propose_exception", "scaffold"}

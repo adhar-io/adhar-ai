@@ -36,6 +36,9 @@ from ..config import RuntimeEnv, env, env_int
 from ..observability import METRICS_CONTENT_TYPE, metrics, setup_tracing
 from ..provenance import ORIGIN_LABEL_KEY, ORIGIN_LABEL_VALUE
 from .agents import AgentRegistry
+from .assist import PERSONA_NAMES, STAGE_NAMES, persona_for
+from .assist import offers as assist_offers
+from .assist import report as assist_report
 from .auth import AuthPolicy, Principal
 from .autonomy import RuntimeConfig, lower_of
 from .chores import ChoreRegistry, ChoreRun
@@ -749,14 +752,64 @@ def create_app(
     @app.get("/capabilities")
     async def capabilities(request: Request) -> dict[str, Any]:
         """What the platform can do right now, derived rather than declared."""
-        policy.principal(request)
         catalogue = await capability_catalogue(
             app.state.toolbox, app.state.agents, app.state.knowledge, app.state.chores
         )
         catalogue["tryAsking"] = [
             {"question": q, "demonstrates": why} for q, why in ONBOARDING_QUESTIONS
         ]
+        # Generic first, then the same question answered for whoever is asking:
+        # the catalogue lists what exists, `forYou` lists what applies.
+        principal = policy.principal(request)
+        groups = tuple(getattr(principal, "groups", ()) or ())
+        persona = persona_for(groups)
+        catalogue["forYou"] = {
+            "persona": persona,
+            "offers": [o.as_dict() for o in assist_offers(persona)],
+            "wholeMap": "GET /assist",
+        }
         return catalogue
+
+    @app.get("/assist")
+    async def assist(
+        request: Request, persona: str = "", stage: str = "", entrypoint: str = ""
+    ) -> dict[str, Any]:
+        """Who the platform helps, at which stage, and with what.
+
+        The map behind "assistance for all users at every stage": each offer
+        names the agent, the tools, a question that actually routes there and
+        the surfaces it works on. With no filter this is the whole matrix, which
+        is what a console panel or an onboarding tour renders; called with a
+        token it leads with the persona that token implies.
+
+        `gaps` is the honest half — the (persona, stage) pairs with nothing
+        behind them yet, computed from the matrix rather than remembered.
+        """
+        principal = policy.principal(request)
+        if persona and persona not in PERSONA_NAMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown persona {persona!r}; expected one of {list(PERSONA_NAMES)}",
+            )
+        if stage and stage not in STAGE_NAMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown stage {stage!r}; expected one of {list(STAGE_NAMES)}",
+            )
+        groups = tuple(getattr(principal, "groups", ()) or ())
+        payload = assist_report(persona=persona, stage=stage, groups=groups)
+        if entrypoint:
+            payload["offers"] = [
+                o.as_dict()
+                for o in assist_offers(persona or payload["persona"] or "", stage, entrypoint)
+            ]
+            payload["count"] = len(payload["offers"])
+        payload["you"] = {
+            "groups": list(groups),
+            "persona": payload["persona"] or persona_for(groups),
+            "writeAllowed": bool(getattr(principal, "write_allowed", False)),
+        }
+        return payload
 
     @app.get("/coverage")
     async def coverage(request: Request, limit: int = 50) -> dict[str, Any]:

@@ -80,18 +80,30 @@ burst of queued questions into a burst of concurrent inference spend.
 
 ## 3. The roster
 
-Seven agents ship. Each is a role, a narrow tool list, an autonomy **ceiling**
-and a closed list of colleagues it may hand work to.
+Nine agents ship — eight specialists and the generalist that routing always
+terminates at. Each is a role, a narrow tool list, an autonomy **ceiling** and a
+closed list of colleagues it may hand work to. One per stage of platform work,
+which is what makes `GET /assist` (§7) able to claim every stage is covered.
 
 | Agent | Answers | Ceiling |
 |---|---|---|
-| `incident` | alerts, crashloops, outages, "why is this broken?" | `suggest` |
+| `incident` | alerts, crashloops, outages, SLO burn, "why is this broken?" | `suggest` |
+| `delivery` | failed builds, pipelines, images, preview environments | `suggest` |
+| `release` | promotion, drift, sync failures, rollback | `approve-to-apply` |
+| `data` | Spark jobs, streams, warehouses, ML workloads | `suggest` |
 | `cost` | spend, budgets, showback, right-sizing | `suggest` |
 | `security` | policy, findings, CVEs, compliance evidence | `approve-to-apply` |
-| `platform` | scaffolding, packages, golden paths, Crossplane | `suggest` |
-| `release` | promotion, drift, sync failures, rollback | `approve-to-apply` |
+| `platform` | scaffolding, packages, golden paths, Crossplane, upgrades | `suggest` |
 | `guide` | how-to, onboarding, conventions, documentation | `read-only` |
 | `generalist` | everything else — routing always terminates here | `suggest` |
+
+`delivery` and `data` are the two the platform was missing. `delivery` holds the
+six tools of the `delivery` MCP domain, so "why did my build fail?" is answered
+from the pipeline rather than guessed at from the Deployment it would have
+updated. `data` reaches Spark, Argo Workflows, Kafka and CNPG through
+`list_resources`, and its instructions carry the **verified** API versions
+(`sparkoperator.k8s.io/v1beta2`, `kafka.strimzi.io/v1`, …) because a guessed
+`apiVersion` is a failed call, not an answer.
 
 Each agent also declares the **kinds of knowledge it should read** — the
 security agent grounds on ADRs, runbooks, incidents, manifests and
@@ -217,6 +229,8 @@ Eight ship, **all off, all in dry-run**:
 | `cost-outliers` | namespaces that moved sharply against their own baseline |
 | `security-findings` | violations and findings older than a week, grouped by cause |
 | `cluster-insights` | what k8sgpt's 22 analyzers found today, grouped by cause rather than by object |
+| `failing-builds` | yesterday's failed builds, grouped by the step that broke, app failures separated from platform ones |
+| `stale-previews` | preview environments still running for pull requests nobody is working on |
 | `runbook-rot` | procedures referencing things that no longer exist |
 
 Enabling and going live are **two separate decisions**:
@@ -298,7 +312,51 @@ things that no longer exist. A domain whose MCP server is down is reported
 of what it could do if it were up.
 
 It also carries `tryAsking` — six questions, each demonstrating a different
-capability, none of which can change anything.
+capability, none of which can change anything — and `forYou`, the same question
+answered for whoever is asking: the persona their token implies, and the offers
+that apply to it.
+
+### Who does it help, and when?
+
+```bash
+curl -sS $RUNTIME/assist                            # the whole map
+curl -sS "$RUNTIME/assist?persona=developer&stage=build"
+curl -sS "$RUNTIME/assist?entrypoint=chore"         # what arrives on its own
+```
+
+The catalogue above lists what *exists*; this lists what *applies*, as a matrix
+of **persona × stage**. Seven personas (`newcomer`, `developer`,
+`data-engineer`, `sre`, `platform-engineer`, `security-engineer`, `finops`) and
+eight stages (`learn`, `scaffold`, `build`, `deploy`, `operate`, `optimise`,
+`secure`, `evolve`), and in each cell one or more offers:
+
+```json
+{"persona": "developer", "stage": "build", "agent": "delivery",
+ "ask": "Why did my build fail?",
+ "tools": ["pipeline_runs", "pipeline_run", "build_logs"],
+ "entrypoints": ["cli", "chat", "mcp", "slack", "review"],
+ "why": "Finds the run, names the failing task and step, and quotes the log lines that say why — rather than describing the pipeline."}
+```
+
+Hand-written, unlike the catalogue, and deliberately so: a generated matrix can
+only say what exists, where the judgement being recorded here is that *this* is
+the question *this* person asks at *this* point.
+
+Four things keep it honest, in `tests/test_assist.py`:
+
+* every offer names an **agent that exists** and **tools that exist** in the
+  live registry;
+* every offer only names tools **its own agent may call** — a real tool on an
+  agent that cannot call it is the subtle version of the lie;
+* every `ask` **actually routes** to the agent it names, or to one that can hand
+  off to it, so the example questions a console renders as "try asking" teach
+  the right thing;
+* `gaps()` is empty — every persona is helped at every stage it claims. A new
+  persona or stage with nothing behind it fails the suite by name, which is what
+  turns "assistance at every stage" from a claim into a gate.
+
+`gaps` ships in the response too, so when it is *not* empty the hole is visible
+to whoever is reading rather than only to CI.
 
 ### What could I not answer?
 
@@ -371,7 +429,8 @@ budget fails the scenario.
 | `POST /agents/route` | who would take this, without running anything |
 | `POST /journeys/{surface}` | Slack, a pull request, a failed pipeline |
 | `GET /chores` · `POST /chores/{name}/run` | the catalogue, and one run now |
-| `GET /capabilities` | what the platform can do right now |
+| `GET /capabilities` | what the platform can do right now, plus `forYou` for the caller |
+| `GET /assist` | who it helps, at which stage, with what — and the gaps |
 | `GET /coverage` | what it could not answer, clustered |
 
 All of them are gated by the same policy as the rest of the runtime.

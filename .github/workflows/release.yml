@@ -66,12 +66,13 @@ jobs:
             echo '| Name | Tag | Digest |'
             echo '|---|---|---|'
             for n in adhar-ai-runtime adhar-ai-mcp-cluster adhar-ai-mcp-gitops adhar-ai-mcp-provision \
-                     adhar-ai-mcp-observability adhar-ai-mcp-security adhar-ai-mcp-cost adhar-ai-mcp-catalog; do
+                     adhar-ai-mcp-observability adhar-ai-mcp-security adhar-ai-mcp-cost \
+                     adhar-ai-mcp-catalog adhar-ai-mcp-delivery; do
               digest="$(cosign triangulate "${REGISTRY}/${OWNER}/${n}:${VERSION}" 2>/dev/null | sed -n 's/.*sha256-\([0-9a-f]*\).*/sha256:\1/p' || true)"
               echo "| \`${n}\` | \`${VERSION}\` | \`${digest:-see registry}\` |"
             done
             echo
-            echo "All eight names are one build. Signed keyless (Sigstore) by this repository's workflow; verify with:"
+            echo "All nine names are one build. Signed keyless (Sigstore) by this repository's workflow; verify with:"
             echo
             echo '```'
             echo "cosign verify --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' \\"

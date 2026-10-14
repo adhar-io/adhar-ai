@@ -26,7 +26,7 @@ DOCS="${DOCS:-../adhar/docs}"
 # whole platform rather than its documentation alone.
 REPO="${REPO:-$(cd "$(dirname "${DOCS}")" 2>/dev/null && pwd || echo "")}"
 WORK="$(mktemp -d)"
-DOMAINS=(cluster gitops provision observability security cost catalog)
+DOMAINS=(cluster gitops provision observability security cost catalog delivery)
 
 pass() { printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
@@ -120,12 +120,19 @@ HEALTH="${WORK}/health.json"
 curl -fsS "http://127.0.0.1:${RUNTIME_PORT}/healthz" > "${HEALTH}"
 
 step "The runtime mounted every domain and every tool"
-uv run python - "${HEALTH}" <<'PY' && pass "7 domains, 29 tools, none unreachable" || fail "tool inventory is wrong"
+uv run python - "${HEALTH}" <<'PY' && pass "every domain mounted, every tool present, none unreachable" || fail "tool inventory is wrong"
 import json, sys
+from adhar_ai.config import DOMAINS
+
 h = json.load(open(sys.argv[1]))
-assert len(h["mcp_servers_connected"]) == 7, h["mcp_servers_connected"]
+# Derived from the code rather than counted here: adding a domain or a tool
+# should not need this script edited, and a domain that failed to mount is
+# exactly what this check exists to catch.
+assert set(h["mcp_servers_connected"]) == set(DOMAINS), h["mcp_servers_connected"]
 assert not h["mcp_servers_unreachable"], h["mcp_servers_unreachable"]
-assert len(h["tools"]) == 29, len(h["tools"])
+contract = json.load(open("contract/tools.json"))
+expected = {t["name"] for tools in contract.values() for t in tools}
+assert set(h["tools"]) == expected, sorted(expected ^ set(h["tools"]))
 for w in ("propose_change", "propose_xr", "propose_exception", "scaffold"):
     assert w in h["tools"], w
 PY
@@ -192,7 +199,7 @@ import anyio, sys
 from adhar_ai.runtime.toolbox import MCPToolbox
 
 SERVERS = {d: f"http://127.0.0.1:{${BASE_PORT} + i}" for i, d in enumerate(
-    ["cluster","gitops","provision","observability","security","cost","catalog"])}
+    ["cluster","gitops","provision","observability","security","cost","catalog","delivery"])}
 
 async def main():
     tb = MCPToolbox(SERVERS)
@@ -229,9 +236,16 @@ AGENTIC_PORT=$((RUNTIME_PORT + 6))
 uv run python hack/stub-llm.py "${STUB_PORT}" >"${WORK}/stub.log" 2>&1 &
 echo $! >> "${WORK}/pids"
 
+# The per-minute request budget is raised for this phase only. This harness
+# drives the agentic surface in one burst — a routing table, a chat table, five
+# throwaway messages, tasks, journeys, chores — which is far denser than a human
+# ever is, and the default 60/min starts answering 429 partway through. The
+# limiter itself is unit-tested (tests/test_runtime_routes.py); what is under
+# test here is the agentic layer behind it.
 ADHAR_AI_DOCS_PATH="${DOCS}" ADHAR_AI_REPO_PATH="${REPO}" \
 LLM_GATEWAY_URL="http://127.0.0.1:${STUB_PORT}" \
 ADHAR_AI_LLM_API_KEY="stub" \
+RATE_LIMIT_REQUESTS_PER_MINUTE="600" \
   uv run adhar-ai runtime --config "${WORK}/config.yaml" --listen=":${AGENTIC_PORT}" \
   >"${WORK}/agentic.log" 2>&1 &
 echo $! >> "${WORK}/pids"
@@ -264,12 +278,12 @@ CHECK
 
 step "The capability catalogue is derived from the live tool surface"
 curl -fsS "${A}/capabilities" > "${WORK}/caps.json"
-uv run python - "${WORK}/caps.json" <<'CHECK' && pass "7 domains, the roster and the write promise" || fail "the catalogue does not match live state"
+uv run python - "${WORK}/caps.json" <<'CHECK' && pass "8 domains, the roster and the write promise" || fail "the catalogue does not match live state"
 import json, sys
 c = json.load(open(sys.argv[1]))
-assert len(c["domains"]) == 7, [d["domain"] for d in c["domains"]]
+assert len(c["domains"]) == 8, [d["domain"] for d in c["domains"]]
 assert not c["unavailable"], c["unavailable"]
-assert len(c["agents"]) >= 7, c["agents"]
+assert len(c["agents"]) >= 9, c["agents"]
 assert "pull request" in c["writes"], c["writes"]
 assert c["tryAsking"], "nothing to suggest to a new developer"
 tools = sum(len(d["tools"]) for d in c["domains"])
@@ -285,7 +299,10 @@ while IFS='|' read -r q want; do
 done <<'ROUTES'
 the checkout pod is crashlooping|incident
 why did our spend jump last month?|cost
-how do I scaffold a new Go service?|guide
+how do I scaffold a new Go service?|platform
+what is this platform?|guide
+why did my build fail?|delivery
+the nightly spark job failed again|data
 ROUTES
 
 step "/chat goes through the roster, not past it"
@@ -300,7 +317,8 @@ while IFS='|' read -r q want; do
 done <<'CHATROUTES'
 the checkout pod is crashlooping|incident
 why did our spend jump last month?|cost
-how do I scaffold a new Go service?|guide
+what is this platform?|guide
+why did my build fail?|delivery
 CHATROUTES
 
 step "Each agent is offered only its own tools"
@@ -315,12 +333,12 @@ assert answer["agent"] == "cost", answer["agent"]
 declared = set(roster["cost"]["tools"])
 used = {c["tool"] for c in answer.get("tool_calls", [])}
 assert used <= declared, f"called {used - declared}, which it never declared"
-print(f"      cost declares {len(declared)} tools; the whole surface is 29")
+print(f"      cost declares {len(declared)} tools; the whole surface is 35")
 CHECK
 
 step "A read-only agent stays read-only"
 curl -fsS "${A}/chat" -H 'content-type: application/json' \
-  -d '{"prompt":"how do I scaffold a new Go service?","autonomy":"scoped"}' > "${WORK}/chat-guide.json"
+  -d '{"prompt":"what is this platform?","autonomy":"scoped"}' > "${WORK}/chat-guide.json"
 uv run python - "${WORK}/chat-guide.json" <<'CHECK' && pass "the guide could not be talked up to scoped" || fail "an agent ceiling was widened by the request"
 import json, sys
 a = json.load(open(sys.argv[1]))

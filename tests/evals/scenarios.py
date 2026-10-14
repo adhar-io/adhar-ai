@@ -271,6 +271,25 @@ def grade(scenario: Scenario, result: Any) -> Grade:
             not json_like and fenced <= 2,
             f"{fenced} fenced block(s); json-like={json_like}",
         )
+        lines = [ln.strip() for ln in answer.splitlines() if ln.strip()]
+        opener = answer.lower()
+        announced = [a for a in ANNOUNCEMENTS if opener.startswith(a)]
+        report.check(
+            "opens with the finding, not an announcement of the work",
+            not announced,
+            f"opened with {announced}",
+        )
+        prose = [
+            ln
+            for ln in lines
+            if not ln.startswith(("-", "*", "#", "|", "`", "1.", "2.", "3."))
+            and len(ln.split()) >= 8
+        ]
+        report.check(
+            "writes prose, not only a bulleted report",
+            bool(prose),
+            "every line is a bullet, a heading or a fragment",
+        )
         words = len(answer.split())
         budget = scenario.word_budget
         report.check(
@@ -280,6 +299,29 @@ def grade(scenario: Scenario, result: Any) -> Grade:
         )
     return report
 
+
+#: Openers that announce the work instead of reporting it. A colleague replying
+#: in a thread does not say "Based on my analysis" — they say what they found.
+#: Each of these is a filler sentence the reader has to get past to reach the
+#: answer, which is the opposite of leading with it.
+ANNOUNCEMENTS = (
+    "based on my analysis",
+    "based on the analysis",
+    "based on the information",
+    "i have reviewed",
+    "i have analyzed",
+    "i analyzed",
+    "i've analyzed",
+    "let me",
+    "certainly",
+    "sure,",
+    "great question",
+    "to answer your question",
+    "here is a summary",
+    "here's a summary",
+    "i'd be happy to",
+    "i will now",
+)
 
 #: Words that describe how an answer was assembled rather than what it says.
 #: Fine in an operator's diagnostics; in an answer they are noise, and a model

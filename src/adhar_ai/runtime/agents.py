@@ -58,6 +58,32 @@ DAMPING = 2.0
 #: questions are general, and routing them to a specialist would be worse.
 GENERALIST = "generalist"
 
+#: Keywords that describe the FORM of a question rather than its subject, and
+#: are therefore scored at a fraction of a real match.
+#:
+#: Without this the router had a serious bias: `guide` lists the natural ways to
+#: open a question ("what is", "where is", "how do i"), those are phrases, and a
+#: phrase scores double a word — so "what is k8sgpt reporting right now" and
+#: "where did team-web spend last month" both beat their own domain vocabulary
+#: and landed on the read-only teaching agent with two tools. The most common
+#: phrasings were routed to the least capable agent.
+#:
+#: Scored at 0.5 so ANY word that names a subject outranks them, while a
+#: question that names no subject at all ("how do I get started?") still
+#: reaches the agent whose job that is.
+WEAK_KEYWORDS = frozenset(
+    {
+        "how do i",
+        "how to",
+        "what is",
+        "where is",
+        "should i",
+        "can i",
+        "difference between",
+        "explain",
+    }
+)
+
 
 @dataclass(slots=True)
 class AgentSpec:
@@ -109,9 +135,13 @@ class AgentSpec:
         }
 
 
-#: The shipped roster. Deliberately opinionated: these are the six jobs an
-#: internal developer platform actually has people for. Overridden wholesale by
-#: `agents:` in `adhar-ai-config`.
+#: The shipped roster. Deliberately opinionated: these are the eight jobs an
+#: internal developer platform actually has people for — one per stage of the
+#: work, from "how do I start" (`guide`) through building (`delivery`),
+#: shipping (`release`), running (`incident`), paying for (`cost`), securing
+#: (`security`) and extending (`platform`) a platform, plus the data and ML
+#: workloads that run on it (`data`). Overridden wholesale by `agents:` in
+#: `adhar-ai-config`.
 DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
     AgentSpec(
         name="incident",
@@ -127,7 +157,11 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         tools=(
             "app_status", "sync_status", "app_diff", "list_pods", "describe",
             "get_events", "logs", "resource_health", "promql", "logql",
-            "correlate", "slo_burn", "list_resources", "insights", "propose_change",
+            "correlate", "slo_burn", "list_resources", "insights",
+            # "What changed" is very often "what was built and promoted". One
+            # tool each, not the whole delivery domain: an agent's tool list is
+            # schemas in every turn's prompt, so breadth here costs every run.
+            "pipeline_runs", "promotions", "propose_change",
         ),
         ceiling="suggest",
         knowledge_kinds=("runbook", "incident", "finding", "manifest"),
@@ -135,6 +169,10 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
             "alert", "down", "degraded", "failing", "crash", "crashloop", "outage",
             "error", "broken", "restart", "unhealthy", "incident", "why is",
             "not working", "timeout", "5xx", "oom",
+            # Reliability vocabulary. Without these, "is the SLO burning?" —
+            # the on-call question — matched nothing and fell through.
+            "slo", "burn", "error budget", "blast radius", "p99", "latency",
+            "triage", "k8sgpt",
         ),
         escalates_to=("security", "platform", "release"),
     ),
@@ -174,6 +212,9 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
             "security", "policy", "kyverno", "cve", "vulnerab", "compliance",
             "rbac", "permission", "forbidden", "denied", "exception", "posture",
             "audit", "soc2", "cis", "certificate", "secret",
+            # "What are the critical findings?" is the question this agent
+            # exists for, and `finding` was not in its vocabulary.
+            "finding", "critical", "severity", "evidence", "patch",
         ),
         escalates_to=("platform", "incident"),
     ),
@@ -192,11 +233,18 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         ceiling="suggest",
         knowledge_kinds=("adr", "package", "doc", "manifest", "environment", "cli"),
         keywords=(
-            "scaffold", "create", "new service", "golden path", "package", "template",
+            "scaffold", "create", "author", "new service", "golden path", "package",
+            "template", "insight", "k8sgpt",
             "provision", "bootstrap", "add a", "set up", "install", "crossplane",
             "composite", "xr", "onboard a service",
+            # The `evolve` stage: changing the platform itself. "What breaks if
+            # we upgrade?" reached no specialist before these.
+            "upgrade", "migrat", "deprecat", "what breaks", "version skew",
         ),
-        escalates_to=("security", "release"),
+        # `guide` as well: "what golden paths exist" routes here on the
+        # vocabulary and is a teaching question, not a build one. An agent that
+        # can scaffold should be able to hand back to the one that explains.
+        escalates_to=("security", "release", "guide"),
     ),
     AgentSpec(
         name="release",
@@ -207,7 +255,7 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         ),
         tools=(
             "sync_status", "app_status", "app_diff", "resource_health",
-            "list_resources", "propose_change",
+            "list_resources", "promotions", "propose_change",
         ),
         ceiling="approve-to-apply",
         knowledge_kinds=("runbook", "adr", "doc", "manifest", "environment"),
@@ -237,13 +285,75 @@ DEFAULT_AGENTS: tuple[AgentSpec, ...] = (
         escalates_to=(),
     ),
     AgentSpec(
+        name="delivery",
+        role="Explain a failed build, trace a commit to a running revision, find a preview.",
+        instructions=(
+            "Answer about the path from a commit to a running revision. Work backwards "
+            "from the symptom: `pipeline_runs` to find the run, `pipeline_run` to get the "
+            "failing task and step, then `build_logs` for the lines that say why — quote "
+            "them, because the error text is the answer and a paraphrase of a compiler "
+            "error is useless. kpack builds report a lifecycle phase (`detect`, `build`, "
+            "`export`); name it. If a tool reports `installed: false`, that package is not "
+            "enabled on this platform: say so rather than guessing at a cause."
+        ),
+        tools=(
+            "pipeline_runs", "pipeline_run", "builds", "build_logs", "previews",
+            "promotions", "app_status", "sync_status", "propose_change",
+        ),
+        ceiling="suggest",
+        knowledge_kinds=("doc", "adr", "runbook", "package", "manifest"),
+        keywords=(
+            "build failed", "build failing", "build is failing", "why did my build",
+            "build log", "stuck build", "image not", "did not build", "preview environment",
+            "pull request environment", "pr deployed", "pull request", "preview url",
+            # NOT a bare "my pr": it is a prefix of "my production", and routing
+            # a production question to the build agent is worse than missing one.
+            "build", "rebuild", "pipeline", "pipelinerun",
+            "taskrun", "tekton", "kpack", "buildpack", "compile", "image", "digest",
+            "artifact", "preview",
+        ),
+        escalates_to=("release", "platform", "incident"),
+    ),
+    AgentSpec(
+        name="data",
+        role="Spark jobs, streams, warehouses and ML workloads running on the platform.",
+        instructions=(
+            "Data workloads are custom resources, so reach them with `list_resources` and "
+            "name the API exactly. Verified on this platform: "
+            "sparkoperator.k8s.io/v1beta2 sparkapplications and scheduledsparkapplications; "
+            "argoproj.io/v1alpha1 workflows; kafka.strimzi.io/v1 kafkas; "
+            "postgresql.cnpg.io/v1 clusters; opensearch.opster.io/v1 opensearchclusters. "
+            "For anything else, discover the API rather than assuming a version — a guessed "
+            "apiVersion is a failed call, not an answer. A Spark driver's own logs are pod "
+            "logs: find the driver pod, then `logs`. Distinguish a job that FAILED from one "
+            "the scheduler never admitted (quota, no node, missing image)."
+        ),
+        tools=(
+            "list_resources", "insights", "describe", "get_events", "logs",
+            "resource_health", "promql", "search_packages", "propose_change",
+        ),
+        ceiling="suggest",
+        knowledge_kinds=("doc", "adr", "package", "runbook", "manifest", "environment"),
+        keywords=(
+            "spark job", "spark application", "data pipeline", "training job",
+            "vector database", "my query", "spark", "sparkapplication", "trino",
+            "kafka", "dagster", "airbyte", "mlflow", "kubeflow", "jupyter",
+            "notebook", "lakehouse", "iceberg", "opensearch", "qdrant", "dbt",
+            "warehouse", "etl", "streaming",
+        ),
+        escalates_to=("platform", "incident", "cost"),
+    ),
+    AgentSpec(
         name=GENERALIST,
         role="Anything that does not clearly belong to a specialist.",
         instructions="",
         tools=(),
         ceiling="suggest",
         keywords=(),
-        escalates_to=("incident", "cost", "security", "platform", "release", "guide"),
+        escalates_to=(
+            "incident", "cost", "security", "platform", "release",
+            "delivery", "data", "guide",
+        ),
     ),
 )
 
@@ -283,7 +393,7 @@ class AgentRegistry:
         """Build from the `agents:` block of `adhar-ai-config`.
 
         An empty or absent block keeps the shipped roster, so a platform that
-        never thinks about agents still gets six sensible ones.
+        never thinks about agents still gets eight sensible ones.
         """
         if not data:
             return cls()
@@ -324,28 +434,45 @@ class AgentRegistry:
         """
         text = f" {prompt.lower()} "
         scores: dict[str, float] = {}
+        #: The longest keyword each agent matched on. Used only to break ties,
+        #: below — a tie decided by roster order is a tie decided by nothing.
+        longest: dict[str, int] = {}
         for agent in self._agents.values():
             if agent.name == GENERALIST:
                 continue
             score = 0.0
+            best_match = 0
             for keyword in agent.keywords:
+                hit = False
+                weight = 0.5 if keyword in WEAK_KEYWORDS else None
                 if len(keyword.split()) > 1:
-                    # A phrase is a stronger signal than a word; "how do i" says
-                    # far more about intent than "how".
-                    if keyword in text:
-                        score += 2.0
+                    # A phrase is a stronger signal than a word — "preview
+                    # environment" says far more than "preview" — unless the
+                    # phrase is only the shape of a question (WEAK_KEYWORDS).
+                    hit = keyword in text
+                    score += (weight if weight is not None else 2.0) if hit else 0.0
                 # PREFIX, not whole word. Platform vocabulary inflects
                 # constantly — crashloop/crashlooping, deploy/deploying/deployed,
                 # provision/provisioned — and a word-boundary match on the stem
                 # misses every inflected form, which is most real questions.
                 elif re.search(rf"\b{re.escape(keyword)}", text):
-                    score += 1.0
+                    hit = True
+                    score += weight if weight is not None else 1.0
+                if hit:
+                    best_match = max(best_match, len(keyword))
             if score:
                 scores[agent.name] = score
+                longest[agent.name] = best_match
 
         if not scores:
             return GENERALIST, 0.0
-        best = max(scores, key=lambda k: scores[k])
+        # Ties go to the agent whose matched vocabulary was the most SPECIFIC.
+        # "where is my pr deployed" matches `guide`'s "where is" and
+        # `delivery`'s "pr deployed" equally at 2.0 apiece; the longer phrase is
+        # the one that identified the actual subject. Without this the winner is
+        # whichever agent happens to sit earlier in the roster, which means
+        # adding an agent silently re-routes unrelated questions.
+        best = max(scores, key=lambda k: (scores[k], longest.get(k, 0), k))
         total = sum(scores.values())
         # Damped by DAMPING so a single weak match does not report certainty.
         # An unqualified `best / total` gives 1.0 whenever exactly one agent

@@ -97,7 +97,7 @@ kubectl rollout restart deployment -n adhar-system -l adhar.io/origin=adhar-ai
 kubectl -n adhar-system rollout status deployment/adhar-ai-runtime
 ```
 
-The label selects exactly the eight adhar-ai Deployments. Do not use
+The label selects exactly the nine adhar-ai Deployments. Do not use
 `app.kubernetes.io/part-of=adhar-ai`: the vLLM package shares it, and
 restarting a model server to refresh an agent is not the same job.
 

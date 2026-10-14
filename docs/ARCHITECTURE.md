@@ -59,13 +59,13 @@ image, no per-role build, and no drift between them.
 
 | Role | What it is | `args` |
 |---|---|---|
-| 🔌 MCP tool servers | seven per-domain servers, streamable HTTP at `/mcp` on `:8080` | `mcp --domain=<domain> --listen=:8080` |
+| 🔌 MCP tool servers | eight per-domain servers, streamable HTTP at `/mcp` on `:8080` | `mcp --domain=<domain> --listen=:8080` |
 | 🧠 Agent runtime | the plan–act–observe loop, its operators and its HTTP surface | `runtime --config=/etc/adhar-ai/config.yaml --listen=:8080` |
 | 🚪 LLM gateway | provider-agnostic, OpenAI-compatible — **local development only** | `gateway --listen=:8080` |
 
 `src/adhar_ai/cli.py` is the whole of that dispatch. CI pushes the single build
-under **eight published names** (`adhar-ai-runtime` plus
-`adhar-ai-mcp-<domain>` for each of the seven domains). There is deliberately no
+under **nine published names** (`adhar-ai-runtime` plus
+`adhar-ai-mcp-<domain>` for each of the eight domains). There is deliberately no
 `adhar-ai-gateway` name: ADR-0025 retired that Deployment in favour of upstream
 agentgateway, and the `gateway` subcommand survives only for `docker compose`
 and a bare laptop run.
@@ -74,7 +74,7 @@ Two more entrypoints exist and deploy nothing: `adhar-ai tools` prints the tool
 inventory as JSON (the Go-CLI contract, diffed against `contract/tools.json` in
 CI) and `adhar-ai index` re-indexes the docs tree into pgvector.
 
-### The seven MCP domains
+### The eight MCP domains
 
 One Deployment and Service per domain, all running the same image with a
 different `--domain`. The split is not organisational — it is the unit of
@@ -84,16 +84,25 @@ same four names.
 
 | Domain | Read tools | Write tool | Backend |
 |---|---|---|---|
-| `cluster` | `list_pods`, `describe`, `get_events`, `logs`, `resource_health` | — | Kubernetes API |
+| `cluster` | `list_pods`, `describe`, `get_events`, `logs`, `resource_health`, `list_resources`, `insights` | — | Kubernetes API, k8sgpt Results |
 | `gitops` | `app_status`, `sync_status`, `app_diff` | `propose_change` | ArgoCD REST, Kubernetes fallback |
 | `provision` | `list_xrs`, `xr_status` | `propose_xr` | Crossplane XRs via Kubernetes |
 | `observability` | `promql`, `logql`, `traceql`, `slo_burn`, `correlate` | — | Prometheus, Loki, Tempo |
 | `security` | `findings`, `policy_explain`, `posture` | `propose_exception` | Kyverno + PolicyReports |
 | `cost` | `cost_by`, `budget_status`, `showback` | — | OpenCost |
 | `catalog` | `search_packages`, `template_params` | `scaffold` | Gitea tree + ArgoCD inventory |
+| `delivery` | `pipeline_runs`, `pipeline_run`, `builds`, `build_logs`, `promotions`, `previews` | — | Tekton, kpack, Kargo, preview Applications |
 
-Twenty-seven tools, four of them writes. Full argument-level reference:
+Thirty-five tools, four of them writes. Full argument-level reference:
 [TOOLS.md](TOOLS.md).
+
+`delivery` is read-only by design even though its subject — a failed build —
+usually wants a code change: fixing it means changing a repository, and that
+path exists exactly once, in `gitops.propose_change`. A second write path for
+the same outcome would be a second thing to audit. Each of the four packages it
+reads (Tekton, kpack, Kargo, preview environments) is optional, so its tools
+distinguish `installed: false` from "installed and healthy", and re-raise a 403
+rather than letting an RBAC refusal look like an empty cluster.
 
 ### Why Python, when the Adhar core is Go
 
@@ -182,7 +191,7 @@ rather than replaced by the agent's. A person's question must reach the gateway
 as that person: their token meters their spend against their own Keycloak
 group, and a budget is kept against them rather than pooled per role.
 
-Note the runtime reaches the seven MCP servers **directly** by ClusterIP, using
+Note the runtime reaches the eight MCP servers **directly** by ClusterIP, using
 the `mcpServers` map in the `adhar-ai-config` ConfigMap — not through the
 federated endpoint. Federation exists for external clients; the runtime is
 already inside the trust boundary and would only add a hop.
@@ -233,7 +242,7 @@ header is simply absent.
   │     rule 2  admin            (unconditional — readmits the other 4)      │
   │                                                                          │
   │   AgentgatewayBackend `adhar-mcp`:  prefixMode Always, FailOpen,         │
-  │     Stateful session routing — seven tool lists merged into one          │
+  │     Stateful session routing — eight tool lists merged into one          │
   └──────────────────────────────────────────────────────────────────────────┘
         │              │              │            │           │
         ▼              ▼              ▼            ▼           ▼
@@ -426,7 +435,7 @@ them. The guarantee is **structural**:
 
 - No mutating tool exists. There is no `kubectl_apply`, `argo_sync`,
   `helm_install`, `scale`, `patch`, `rollback` or `exec` tool in any of the
-  seven domains, so there is no apply path for a prompt injection to hijack.
+  eight domains, so there is no apply path for a prompt injection to hijack.
 - `clients/kube.py` exposes no create/patch/delete surface at all. The read
   client is the only Kubernetes client in the codebase.
 - `mcp/common/pr.py` imports no Kubernetes, AWS, Azure or GCP client.
@@ -461,7 +470,7 @@ Threat model in full: [SECURITY.md](SECURITY.md).
 
 ADR-0024 answered *how does an agent act safely?* ADR-0025 answered the question
 that followed it: *who governs the traffic?* The original design put token
-validation, group checks and budget accounting in seven Python services, and left
+validation, group checks and budget accounting in eight Python services, and left
 the controls that matter most — content filtering, per-identity token budgets,
 MCP multiplexing, OTel GenAI spans, a model cost catalog — unbuilt, as a
 multi-quarter project that is not differentiated platform work.
@@ -476,8 +485,8 @@ Gateway API plus four CRDs.
 | Per-tool authorization over `jwt.groups` | the four operators and their triggers |
 | Prompt/response guardrails (credential masking, PII audit) | the staged-autonomy ladder and the `writePolicy` gate |
 | Per-group request and token budgets | grounding: chunking, embedding, retrieval |
-| OTel GenAI telemetry to Tempo, metrics to Grafana | the 29 tools and their backends |
-| MCP federation: seven servers, one `/mcp` endpoint | the single `open_pr` write path and its provenance |
+| OTel GenAI telemetry to Tempo, metrics to Grafana | the 35 tools and their backends |
+| MCP federation: eight servers, one `/mcp` endpoint | the single `open_pr` write path and its provenance |
 | Provider keys and model-name routing | structured audit events on every tool call |
 
 The alternatives ADR-0025 rejected are worth knowing: finishing the bespoke
@@ -761,8 +770,8 @@ detail: [OPERATIONS.md](OPERATIONS.md).
 | An MCP-native layer acting through existing control surfaces | a Console chatbot calling the Kubernetes API directly | the chatbot is either read-only and of limited value, or holds broad write credentials and sits outside GitOps, bypassing review, policy and drift detection (ADR-0024 Context) |
 | Self-hosted, one configurable key | a hosted SaaS copilot | conflicts with the 100%-open-source, no-phone-home principle and leaks platform state to a third party (ADR-0024 Context) |
 | A separate Python repository | an agent runtime inside the Go core | the MCP/agent/LLM ecosystem is Python; cramming it into Go would fight the ecosystem and bloat a core whose bootstrap boundary is deliberately narrow (ADR-0024 §1) |
-| One image, role selected by `args` | one image per role | eight Deployments from one build: no drift between roles, no per-role pipeline, and the manifests already pass the args |
-| Seven per-domain MCP servers | one server with all 29 tools | the domain is the unit of authorization — `GITEA_WRITE_ENABLED` and agentgateway's CEL rules both key on it |
+| One image, role selected by `args` | one image per role | nine Deployments from one build: no drift between roles, no per-role pipeline, and the manifests already pass the args |
+| Seven per-domain MCP servers | one server with all 35 tools | the domain is the unit of authorization — `GITEA_WRITE_ENABLED` and agentgateway's CEL rules both key on it |
 | agentgateway as the AI data plane | finish building `adhar-ai-llm-gateway` | a multi-quarter build of undifferentiated proxy features, then permanent maintenance of a security-critical component tracking a spec that revised twice in 2026 (ADR-0025) |
 | agentgateway over LiteLLM | LiteLLM as the LLM proxy | an LLM proxy only: no MCP federation, no A2A, no Gateway API integration, no tool-level authorization — half the problem and a second runtime (ADR-0025) |
 | agentgateway behind the Cilium edge | agentgateway as a second terminating edge | one TLS story, one host port, one place to look; nothing is lost because protocol awareness works identically one hop in (ADR-0025 §7) |
@@ -771,7 +780,7 @@ detail: [OPERATIONS.md](OPERATIONS.md).
 | `scoped` autonomy ships with an empty allow-list | inherit the broad `allowedRepos`/`allowedPathPrefixes` | `scoped` opens PRs unattended; inheriting would be a silent widening, so it fails closed and names the field to set |
 | Unauthenticated callers answered, pinned to `read-only` | refuse outright / serve normally | refusing breaks every local run; serving normally leaves an unauthenticated path to real PRs at the `suggest` default |
 | DNS-rebinding guard off by default on MCP | the SDK's localhost-only allow-list | agentgateway reaches the servers by Service `backendRef`, so the Host header is un-enumerable; the SDK default answers `421` to every real caller and takes out the whole federated tool surface. The real boundary is the gateway's JWT check |
-| MCP federation `FailOpen`, `prefixMode: Always` | `FailClosed`, `Conditional` prefixes | one rolling Deployment among seven should cost you one domain's tools, not the session; and a tool name that changes with how many servers are up breaks both client caches and the authorization CEL |
+| MCP federation `FailOpen`, `prefixMode: Always` | `FailClosed`, `Conditional` prefixes | one rolling Deployment among eight should cost you one domain's tools, not the session; and a tool name that changes with how many servers are up breaks both client caches and the authorization CEL |
 | Lexical BM25 fallback for grounding | return `[]` when pgvector is unavailable | a silent `[]` is indistinguishable from "the docs say nothing"; an unkeyed platform answered ungrounded with no sign anything was missing |
 | Findings persisted to the existing RAG database | a new datastore / memory only | reuses what is already provisioned; memory alone lost every finding on a restart, which is the wrong property for a `read-only` operator's only output |
 | Response cache limited to `temperature == 0`, per tenant | cache everything | anything else asks the provider for variation, and cross-tenant sharing turns a cache into a disclosure channel |
@@ -805,6 +814,6 @@ detail: [OPERATIONS.md](OPERATIONS.md).
 |---|---|
 | 🚀 [Getting Started](GETTING_STARTED.md) | From `uv sync` to a grounded answer to an opened pull request |
 | 🤖 [Agents & Automation](AGENTS.md) | The specialist roster, durable tasks, approvals, chores and journeys |
-| 🧰 [Tool Reference](TOOLS.md) | Every one of the 29 tools: arguments, backend, failure mode |
+| 🧰 [Tool Reference](TOOLS.md) | Every one of the 35 tools: arguments, backend, failure mode |
 | ⚙️ [Operations](OPERATIONS.md) | Every setting, the health surface, and how to diagnose it |
 | 🔐 [Security](SECURITY.md) | Threat model, the write path, authentication, autonomy, prompt injection |

@@ -44,7 +44,7 @@ jobs:
         # one.
         run: uv run pytest tests/test_red_team.py tests/evals -q
 
-      - name: End-to-end (seven MCP servers + the runtime, over real HTTP)
+      - name: End-to-end (eight MCP servers + the runtime, over real HTTP)
         # The unit suite drives tools in-process and fakes the toolbox, so it
         # cannot see the defects that only exist once real processes talk to
         # each other: the transport's Host-header guard, the MCP client's result

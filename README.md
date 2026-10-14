@@ -77,7 +77,7 @@ One image, three entrypoints:
 | Component | What it is | Entrypoint |
 |---|---|---|
 | 🔌 **MCP tool servers** | one server per domain, streamable HTTP at `/mcp` on `:8080` | `adhar-ai mcp --domain <domain>` |
-| 🧠 **Agent runtime** | seven specialist agents, durable tasks, event-driven operators and a tool-use chat loop | `adhar-ai runtime` |
+| 🧠 **Agent runtime** | eight specialist agents, durable tasks, event-driven operators and a tool-use chat loop | `adhar-ai runtime` |
 | 🚪 **LLM gateway** | provider-agnostic, OpenAI-compatible — **local development only** | `adhar-ai gateway` |
 
 In the platform, LLM traffic and the federated MCP endpoint are served by
@@ -102,12 +102,23 @@ the two.
 | `security` | `findings`, `policy_explain`, `posture` | `propose_exception` |
 | `cost` | `cost_by`, `budget_status`, `showback` | — |
 | `catalog` | `search_packages`, `template_params` | `scaffold` |
+| `delivery` | `pipeline_runs`, `pipeline_run`, `builds`, `build_logs`, `promotions`, `previews` | — |
 
-**29 tools, 4 of them writes.** There is deliberately no `kubectl_apply`,
-`argo_sync`, `helm_install` or cloud-mutation tool, and a test asserts each of
-those names is absent from every domain.
+**35 tools across 8 domains, 4 of them writes.** There is deliberately no
+`kubectl_apply`, `argo_sync`, `helm_install` or cloud-mutation tool, and a test
+asserts each of those names is absent from every domain.
 
-Outward, the seven servers are one federated endpoint — `https://mcp.<host>/mcp`
+`delivery` is the newest domain and the one that closed the widest gap. The
+others could say a Deployment was unhealthy, an Application OutOfSync, an image
+refused by policy — none could say **why the build that should have produced
+that image failed**, which is the question developers ask most. It reads Tekton
+runs, kpack builds, Kargo promotions and preview environments, and
+`build_logs` resolves a run name to the pod, then to the *failing* container,
+and tails it. Every package behind it is optional, so a platform without Tekton
+gets `installed: false` naming the package to enable — a fact the model can tell
+apart from "nothing is failing".
+
+Outward, the eight servers are one federated endpoint — `https://mcp.<host>/mcp`
 on agentgateway, which multiplexes them all, validates the Keycloak token and
 authorizes per tool (read tools need `platform-developer`, the PR-opening tools
 need `platform-admin`). **External agents — Claude Code, an IDE, ChatOps — drive
@@ -116,7 +127,7 @@ names arrive prefixed by their server (`gitops_propose_change`), which is what
 the gateway's authorization rules key on.
 
 The servers themselves no longer validate tokens: that control moved to the data
-plane, once, in front of all seven. They still receive the caller's bearer token
+plane, once, in front of all eight. They still receive the caller's bearer token
 (agentgateway sets `preserveToken: true`) so RBAC-scoped reads run as the user.
 
 👉 Full reference: **[docs/TOOLS.md](docs/TOOLS.md)**
@@ -142,28 +153,40 @@ and there is no rung at which the model chooses its own scope — the allow-list
 read from the ConfigMap, never from a tool argument, because an argument is
 something a prompt injection can set.
 
-Four operators run on events rather than a schedule: **alert-triage**
+Five operators run on events rather than a schedule: **alert-triage**
 (Alertmanager webhook), **drift-explain** (ArgoCD OutOfSync), **cost-advisor**
-(OpenCost) and **upgrade-preflight**. Each emits a structured finding. Whether
-that finding becomes a PR is the stage's decision, not the model's.
+(OpenCost), **upgrade-preflight**, and **build-failure** (Tekton CloudEvents) —
+the one a developer actually reads, because it arrives with the failing step
+already quoted. Each emits a structured finding. Whether that finding becomes a
+PR is the stage's decision, not the model's.
 
 ---
 
 ## 🧑‍🚀 Specialist agents, durable work and quiet automation
 
-A single assistant with twenty-seven tools answers every question the same
-average way. Seven specialists do not, and none of them can do more than the one
-assistant could:
+A single assistant with thirty-five tools answers every question the same
+average way. Eight specialists do not, and none of them can do more than the one
+assistant could — one per stage of platform work:
 
 | Agent | Answers | Ceiling |
 |---|---|---|
-| 🚨 `incident` | alerts, crashloops, outages, "why is this broken?" | `suggest` |
+| 🚨 `incident` | alerts, crashloops, outages, SLO burn, "why is this broken?" | `suggest` |
+| 🚚 `delivery` | failed builds, pipelines, images, preview environments | `suggest` |
+| 🚢 `release` | promotion, drift, sync failures, rollback | `approve-to-apply` |
+| 🧪 `data` | Spark jobs, streams, warehouses, ML workloads | `suggest` |
 | 💰 `cost` | spend, budgets, showback, right-sizing | `suggest` |
 | 🔐 `security` | policy, findings, CVEs, compliance evidence | `approve-to-apply` |
-| 🏗️ `platform` | scaffolding, packages, golden paths, Crossplane | `suggest` |
-| 🚢 `release` | promotion, drift, sync failures, rollback | `approve-to-apply` |
+| 🏗️ `platform` | scaffolding, packages, golden paths, Crossplane, upgrades | `suggest` |
 | 📖 `guide` | how-to, onboarding, conventions | `read-only` |
 | 🧭 `generalist` | everything else — routing always terminates here | `suggest` |
+
+Routing is lexical and tuned on a real failure mode: `guide` used to list the
+natural ways to open a question ("what is", "where is", "how do i"), phrases
+scored double a word, and so the most common phrasings landed on the *least*
+capable agent — "what is k8sgpt reporting right now" went to the read-only
+teacher with two tools. Question **form** now scores a fraction of question
+**subject**, ties break on the more specific match rather than on roster order,
+and a question with no subject of its own still reaches `guide`.
 
 Each agent's **ceiling narrows and never widens**: a `read-only` agent stays
 read-only for a platform administrator at `scoped`, because the narrowing
@@ -189,9 +212,10 @@ Above `suggest`, the agent writes a plan **without acting** and the task stops.
 Releasing it needs the same `platform-admin` credential the PR-opening tools do,
 because a task that can change the platform is exactly as privileged as a write.
 
-**Seven chores ship, all off and all in dry-run.** Certificate expiry, drift,
-orphaned resources, failing scorecards, cost outliers, stale findings, runbook
-rot. Enabling one and letting it act are two separate decisions, and
+**Ten chores ship, all off and all in dry-run.** Certificate expiry, drift,
+orphaned resources, failing scorecards, cost outliers, stale findings, cluster
+insights, failing builds, stale previews, runbook rot. Enabling one and letting
+it act are two separate decisions, and
 `maxProposals` bounds what a single run can open — the difference between a
 helpful Monday morning and an unreviewable flood.
 
@@ -207,6 +231,72 @@ badly, clustered by how often each has been asked — which is the list somebody
 writes the missing runbook from.
 
 👉 Full reference: **[docs/AGENTS.md](docs/AGENTS.md)**
+
+---
+
+## 🧭 Every user, every stage — and a test that proves it
+
+An assistant with thirty-five tools still fails the person who never finds out
+that any of it applies to them. Two failures look identical from outside: the
+capability is **absent** (nobody wired a tool, which is what every question
+about a failed build used to be), or it is **unreachable** — it exists and the
+person asks a colleague instead, while usage metrics say everything is fine.
+
+`GET /assist` is the map that makes both visible: a **persona × stage** matrix
+where each cell names the agent, the tools, a question that really routes there,
+and the surfaces it works on.
+
+| | learn | scaffold | build | deploy | operate | optimise | secure | evolve |
+|---|---|---|---|---|---|---|---|---|
+| newcomer | ✅ | ✅ | | | | | | |
+| developer | ✅ | ✅ | ✅ | ✅ | ✅ | | | |
+| data-engineer | | | ✅ | ✅ | ✅ | ✅ | | |
+| sre | | | | ✅ | ✅ | ✅ | | |
+| platform-engineer | | ✅ | | | ✅ | | ✅ | ✅ |
+| security-engineer | | | | | | | ✅ | ✅ |
+| finops | | | | | | ✅ | | |
+
+```bash
+curl -sS "$RUNTIME/assist?persona=developer&stage=build"
+curl -sS "$RUNTIME/assist?entrypoint=chore"     # what arrives without being asked
+curl -sS "$RUNTIME/capabilities"                # …plus `forYou`, for the caller's own token
+```
+
+Each persona is inferred from the caller's Keycloak groups, then refined by what
+they just asked: an admin asking a cost question is being a finops person for
+the next five minutes, and those are the offers worth showing them.
+
+**It is a gate, not a brochure.** `tests/test_assist.py` asserts that every
+offer names an agent that exists and tools that exist, that it only names tools
+**its own agent may call**, that every example question actually routes to the
+agent it names (or to one that can hand off to it), and that `gaps()` is empty —
+every persona helped at every stage it claims. Add a persona, delete a tool or
+narrow a roster and the suite fails with the offer that became a lie. `gaps`
+ships in the response too, so a hole is visible to a reader and not only to CI.
+
+### Answers that read like a colleague's
+
+The answer contract in the system prompt covers three things, each of which was
+a complaint first:
+
+- **Process before answering.** Start wide (`insights`, `sync_status`,
+  `pipeline_runs` — the thing you were asked about is often one of several with
+  one cause), then narrow. Once there is a hypothesis, check the one thing that
+  would disprove it. An empty tool result is not an answer: try the adjacent
+  tool, then say what could not be established. "The build failed" is a
+  restatement; "the `go-build` step exited 2 on a missing module" is an answer.
+- **Conversational, not a report.** Plain prose, second person, no
+  "Based on my analysis" — open with the finding. Bullets only for a genuine
+  list; prose for anything with a *because* in it. One concrete offer of a next
+  action is welcome; generic offers of further help are not.
+- **Accurate about what it knows.** Observed, inferred and could-not-establish
+  are three different statements, and the answer says which. Identifiers and
+  error strings are quoted exactly, because a reworded error cannot be searched
+  for. Every number carries its unit and window.
+
+The scenario evals grade these as properties rather than phrasing — including,
+now, that an answer opens with its finding and contains real prose rather than
+only bullets.
 
 ---
 
@@ -249,6 +339,7 @@ clients are wired up.
 | `POST /journeys/{surface}` | Slack, a pull request, a failed pipeline |
 | `GET /chores` · `POST /chores/{name}/run` | the catalogue, and one run now |
 | `GET /capabilities` | what the platform can do right now, derived not declared |
+| `GET /assist` | who it helps, at which stage, with what — and where the gaps are |
 | `GET /coverage` | what it could not answer — the queue of runbooks to write |
 
 `/healthz` is the only one left open — it is the readiness probe, and it
@@ -365,7 +456,7 @@ uv sync --extra rag                    # Python 3.12+
 uv run adhar-ai tools                  # the tool inventory — no cluster needed
 uv run adhar-ai mcp --domain cluster   # :8081/mcp
 uv run adhar-ai runtime                # :8082
-docker compose up                      # the whole stack: gateway, all seven
+docker compose up                      # the whole stack: gateway, all eight
                                        # MCP servers, the runtime and pgvector
 ```
 
@@ -387,11 +478,11 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 | Guide | What it covers |
 |---|---|
 | 🚀 **[Getting Started](docs/GETTING_STARTED.md)** | From `uv sync` to a grounded answer to an opened PR, step by step |
-| 🏛️ **[Architecture](docs/ARCHITECTURE.md)** | How the three components, the seven servers and the data plane fit together |
-| 🧰 **[Tool Reference](docs/TOOLS.md)** | Every one of the 29 tools: arguments, backend, failure mode |
+| 🏛️ **[Architecture](docs/ARCHITECTURE.md)** | How the three components, the eight servers and the data plane fit together |
+| 🧰 **[Tool Reference](docs/TOOLS.md)** | Every one of the 35 tools: arguments, backend, failure mode |
 | 🔌 **[Connect a client](docs/CONNECT.md)** | Claude Code, Cursor, Claude Desktop or your own agent on the Adhar MCP endpoint, in one command |
 | 🧠 **[Knowledge Base](docs/KNOWLEDGE.md)** | What the agent knows, how it stays current, and how it learns |
-| 🤖 **[Agents & Automation](docs/AGENTS.md)** | The specialist roster, durable tasks, approvals, chores and journeys |
+| 🤖 **[Agents & Automation](docs/AGENTS.md)** | The specialist roster, the persona × stage map, durable tasks, approvals, chores and journeys |
 | 🏭 **[Production](docs/PRODUCTION.md)** | Metrics, resilience, admission control, safety and the quality gates |
 | ⚙️ **[Operations](docs/OPERATIONS.md)** | Every setting, the health surface, and how to diagnose it when it is wrong |
 | 🔐 **[Security](docs/SECURITY.md)** | Threat model, the write path, authentication, autonomy, prompt injection |
@@ -404,7 +495,7 @@ and what to expect at each step — is **[docs/GETTING_STARTED.md](docs/GETTING_
 
 ```bash
 uv sync --extra rag
-uv run pytest -q                       # 511 tests (530 with a database)
+uv run pytest -q                       # 663 tests (686 with a database)
 uv run ruff check src tests
 uv run mypy src
 uv run adhar-ai tools | diff -u contract/tools.json -   # the Go-CLI contract
@@ -425,7 +516,7 @@ running.
 ./hack/e2e-local.sh
 ```
 
-Stands up all seven MCP servers and the runtime over **real HTTP** and asserts
+Stands up all eight MCP servers and the runtime over **real HTTP** and asserts
 the seam between them: the transport's Host-header handling, the MCP client's
 result unwrapping, and whether an unconfigured backend's error text survives the
 trip to the model. A second runtime then runs against a scripted
@@ -503,7 +594,7 @@ surfaced until `hack/release.sh` refused to cut `0.3.4`. The habit that avoids
 it: run the gates above (or `./hack/release.sh --dry-run`, which is the same
 set) **before** pushing, and treat `ci` on `main` as the release gate it is.
 
-After the tag, `images.yml` builds and signs the eight images and `release.yml`
+After the tag, `images.yml` builds and signs the nine images and `release.yml`
 then publishes the GitHub Release with the tool contract and the SBOM. The
 platform tracks `:latest`, so there are no manifest changes to make — roll the
 pods, and `/healthz` reports the version and commit now running:
@@ -532,7 +623,7 @@ through Gateway API. It is the production data plane for both AI protocols:
 | | Endpoint | What it does |
 |---|---|---|
 | 🚪 LLM | `https://ai.<host>/v1/chat/completions` | routes on the model name; holds the provider keys server-side; masks credential-shaped strings; per-group token budgets |
-| 🔌 MCP | `https://mcp.<host>/mcp` | federates the seven servers into one tool list; authorizes per tool |
+| 🔌 MCP | `https://mcp.<host>/mcp` | federates the eight servers into one tool list; authorizes per tool |
 | 🧠 Agent | `https://agent.<host>/` | this repo's runtime (`/chat`, `/findings`, operator webhooks) — the one AI surface not behind the data plane |
 
 ---
@@ -544,7 +635,7 @@ Phase 3 agentic entry.
 
 | Capability | Status |
 |---|---|
-| MCP-native tools, 7 domains, PR-only writes | ✅ 511 tests, 530 with a database |
+| MCP-native tools, 8 domains, PR-only writes | ✅ 663 tests, 686 with a database |
 | Federated MCP over streamable HTTP at `/mcp` | ✅ verified against the Host headers a Pod actually receives |
 | GitOps-safe runtime, four-rung autonomy ladder | ✅ each rung behaviourally distinct and tested |
 | Authentication on the runtime's own surface | ✅ Keycloak JWT, webhook token, outbound service-account token |
@@ -556,8 +647,11 @@ Phase 3 agentic entry.
 | Durable tasks, plan-and-approve, bounded workers | ✅ state machine refuses illegal moves; approval needs a write credential |
 | Knowledge graph over the same Postgres | ✅ verified against a real database: traversal, blast radius, cycles, per-origin refresh |
 | Chores, journeys, capability catalogue, coverage gaps | ✅ every chore ships off and in dry-run, asserted as policy |
+| Build and delivery assistance (`delivery` domain, `delivery` agent, `build-failure` operator, `failing-builds` chore) | ✅ Tekton/kpack/Kargo/preview shapes read and summarised; optional-package and RBAC paths tested |
+| Assistance mapped to every persona and stage (`GET /assist`) | ✅ 7 personas × 8 stages, 24 offers, **0 gaps** — and the suite fails if an offer names an agent, a tool or a question that does not hold |
+| Data and ML workload assistance (`data` agent) | ✅ reaches Spark, Argo Workflows, Kafka and CNPG through `list_resources` with verified API versions |
 | **Live run against a real LLM and a real cluster** | ✅ **see below** |
-| Container images on GHCR | ✅ eight names from one build, Cosign-keyless signed with an SPDX SBOM attached |
+| Container images on GHCR | ✅ nine names from one build, Cosign-keyless signed with an SPDX SBOM attached |
 | The running build is identifiable | ✅ `/healthz` reports `version` and the commit `revision`, baked in at build time |
 | GPU run of the `ai/vllm` profile | ⏳ needs a GPU node pool |
 | Self-hosted inference via `ai/llm-d` (router + agentgateway sidecar → vLLM), CPU profile and Qwen3.6-27B-FP8 GPU profile, wired as the secondary model of every agentic feature | ⏳ CPU profile ran 2026-09-24; GPU profile and the fallback path await a GPU cluster |

@@ -90,12 +90,38 @@ def test_config_overrides_the_roster_but_always_keeps_a_terminus():
         ("the checkout pod is crashlooping", "incident"),
         ("why did our spend jump last month?", "cost"),
         ("is this image vulnerable to anything?", "security"),
-        ("how do I scaffold a new Go service?", "guide"),
+        # "how do I" is the SHAPE of a question; "scaffold a new service" is its
+        # subject, and the subject decides. `platform` can cite the template and
+        # propose the scaffold, where `guide` could only describe it — and
+        # `platform` hands back to `guide` when it turns out to be a pure
+        # documentation question. (This row expected `guide` while interrogative
+        # phrases outscored domain words; see WEAK_KEYWORDS.)
+        ("how do I scaffold a new Go service?", "platform"),
         ("the app has been OutOfSync since the deploy", "release"),
+        ("why did my build fail?", "delivery"),
+        ("where is my pull request deployed?", "delivery"),
+        ("the nightly spark job failed again", "data"),
+        ("is the checkout SLO burning?", "incident"),
+        ("what breaks if we upgrade the cluster?", "platform"),
     ],
 )
 def test_the_router_reaches_the_obvious_specialist(prompt, expected):
     assert AgentRegistry().route(prompt)[0] == expected
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "how do i get started?",
+        "what is this platform?",
+        "where is the documentation?",
+        "explain the difference between a project and an environment",
+    ],
+)
+def test_a_question_with_no_subject_still_reaches_the_teacher(prompt):
+    """The other half of WEAK_KEYWORDS: scoring interrogatives low must not cost
+    `guide` the questions that are genuinely only about learning."""
+    assert AgentRegistry().route(prompt)[0] == "guide"
 
 
 def test_inflected_platform_vocabulary_still_routes():

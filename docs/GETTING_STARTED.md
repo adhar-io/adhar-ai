@@ -18,7 +18,7 @@ opened pull request. Every command here has been run; every output shown is real
 3. [Meet the tools, with no cluster at all](#3-meet-the-tools-with-no-cluster-at-all)
 4. [Run one MCP server](#4-run-one-mcp-server)
 5. [Run the whole stack with Docker Compose](#5-run-the-whole-stack-with-docker-compose)
-6. [Run it by hand, seven servers and a runtime](#6-run-it-by-hand-seven-servers-and-a-runtime)
+6. [Run it by hand, eight servers and a runtime](#6-run-it-by-hand-eight-servers-and-a-runtime)
 7. [Ask it something](#7-ask-it-something)
 8. [Point it at a real cluster](#8-point-it-at-a-real-cluster)
 9. [Turn on the LLM](#9-turn-on-the-llm)
@@ -97,7 +97,7 @@ uv run adhar-ai tools
 }
 ```
 
-Twenty-seven tools across seven domains, four of them writes. Count them:
+Thirty-five tools across eight domains, four of them writes. Count them:
 
 ```bash
 uv run adhar-ai tools | python3 -c '
@@ -172,14 +172,14 @@ curl -s -X POST localhost:8081/mcp \
 > request would be answered `421 Invalid Host header`. DNS rebinding is a
 > browser attack against a loopback-bound server, and there is no browser on a
 > Pod's loopback; the real boundary is agentgateway's Keycloak validation in
-> front of all seven. Set `ADHAR_AI_MCP_ALLOWED_HOSTS` to a comma-separated list
+> front of all eight. Set `ADHAR_AI_MCP_ALLOWED_HOSTS` to a comma-separated list
 > to switch the guard back on.
 
 ---
 
 ## 5. Run the whole stack with Docker Compose
 
-One command brings up the local gateway, all seven MCP servers, the runtime and
+One command brings up the local gateway, all eight MCP servers, the runtime and
 a pgvector Postgres:
 
 ```bash
@@ -191,7 +191,7 @@ docker compose up --build
 |---|---|---|
 | runtime | 8080 | the agent: `/chat`, `/findings`, operator webhooks |
 | gateway | 8081 | the local-dev LLM gateway |
-| mcp-cluster … mcp-catalog | 8090–8096 | the seven tool servers |
+| mcp-cluster … mcp-delivery | 8090–8097 | the eight tool servers |
 | rag-db | 5432 | pgvector, for grounding |
 
 ```bash
@@ -206,7 +206,7 @@ checkout if it is not a sibling directory.
 
 ---
 
-## 6. Run it by hand, seven servers and a runtime
+## 6. Run it by hand, eight servers and a runtime
 
 Useful when you are changing the code and do not want a rebuild between edits.
 
@@ -283,7 +283,7 @@ curl -s localhost:18110/healthz | jq
 
 Read that health block closely, because it tells you exactly what you have:
 
-- **`mcp_servers_connected`** lists all seven. A server that is down appears in
+- **`mcp_servers_connected`** lists all eight. A server that is down appears in
   `mcp_servers_unreachable` with its error, and costs you only its own tools.
 - **`rag`** says `lexical only`. With no key and no database, grounding still
   works: an in-process BM25 index over the docs tree answered with 1,051 real
@@ -484,7 +484,7 @@ pinned to `read-only` regardless of all three.
 
 ## 11. Connect your own agent
 
-The seven servers are ordinary MCP servers, so Claude Code, an IDE assistant or
+The eight servers are ordinary MCP servers, so Claude Code, an IDE assistant or
 a ChatOps bot drives Adhar through the identical governed tools. On a platform
 with `ai/agentgateway` enabled, that is one URL and one token:
 
@@ -521,7 +521,7 @@ Locally, point at a single server instead:
   "url": "http://localhost:18101/mcp" } } }
 ```
 
-Your agent gets the same 29 tools, the same read/write tagging, and the same
+Your agent gets the same 35 tools, the same read/write tagging, and the same
 guarantee: the only write it can perform is opening a pull request.
 
 ---

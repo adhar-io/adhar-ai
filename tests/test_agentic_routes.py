@@ -459,7 +459,7 @@ def test_two_different_questions_get_two_different_tool_sets(runtime):
     client, _, gateway = runtime
     client.post("/chat", json={"prompt": "the checkout pod is crashlooping"})
     incident_tools = {s.function.name for s in gateway.requests[-1]["tools"]}
-    client.post("/chat", json={"prompt": "how do I scaffold a new Go service?"})
+    client.post("/chat", json={"prompt": "what is this platform?"})
     guide_tools = {s.function.name for s in gateway.requests[-1]["tools"]}
 
     assert incident_tools != guide_tools
@@ -493,10 +493,13 @@ def test_chat_applies_the_agents_ceiling_not_just_the_callers():
             s.function.name == "propose_change" for s in gateway.requests[-1]["tools"]
         )
 
-        # The same writer asking the `guide` does not.
+        # The same writer asking the `guide` does not. (A question with no
+        # subject of its own, so this stays a test about the CEILING rather than
+        # about routing: "how do I scaffold…" now reaches `platform`, which can
+        # actually scaffold.)
         guide = client.post(
             "/chat",
-            json={"prompt": "how do I scaffold a new Go service?", "autonomy": "scoped"},
+            json={"prompt": "what is this platform?", "autonomy": "scoped"},
             headers=writer,
         ).json()
         assert guide["agent"] == "guide"

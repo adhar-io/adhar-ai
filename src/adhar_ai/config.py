@@ -11,7 +11,20 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-DOMAINS = ("cluster", "gitops", "provision", "observability", "security", "cost", "catalog")
+DOMAINS = (
+    "cluster",
+    "gitops",
+    "provision",
+    "observability",
+    "security",
+    "cost",
+    "catalog",
+    # The commit-to-revision path: Tekton PipelineRuns, kpack builds, Kargo
+    # promotions, preview environments. Read-only — fixing a build means
+    # changing a repository, and that path exists exactly once, in
+    # `gitops.propose_change`.
+    "delivery",
+)
 
 #: Where LLM completions go IN THE PLATFORM: the ai/agentgateway data plane
 #: (ADR-0025), not this repo's bundled gateway. It is an OpenAI-compatible base
@@ -193,7 +206,7 @@ class MCPConfig:
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     llm_gateway_url: str = PLATFORM_LLM_GATEWAY_URL
     #: Empty in the platform: ai/agentgateway validates the Keycloak JWT in front
-    #: of all seven servers (ADR-0025). Retained for the token-exchange path and
+    #: of all eight servers (ADR-0025). Retained for the token-exchange path and
     #: for running a server standalone in development.
     oidc_issuer_url: str = ""
     oidc_client_id: str = ""
@@ -210,7 +223,7 @@ class MCPConfig:
     #: `("*",)` — the default — turns the guard off. That is a deliberate,
     #: narrow trade: DNS rebinding is a *browser* attack against a loopback-bound
     #: dev server, and there is no browser on a Pod's loopback. In the platform
-    #: the real boundary is the one ADR-0025 put in front of all seven servers:
+    #: the real boundary is the one ADR-0025 put in front of all eight servers:
     #: agentgateway validates the Keycloak JWT and authorizes per tool. Set
     #: `ADHAR_AI_MCP_ALLOWED_HOSTS` to a comma-separated list to switch the
     #: guard back on when a server is exposed some other way.
@@ -240,7 +253,7 @@ class MCPConfig:
             # RBAC-scoped Kubernetes token) and for local development. Per-server
             # token VALIDATION is gone: in the platform every request arrives
             # through ai/agentgateway, which validates the Keycloak JWT once for
-            # all seven servers and authorizes per tool (ADR-0025), so the
+            # all eight servers and authorizes per tool (ADR-0025), so the
             # manifests no longer set these at all and they are normally empty.
             oidc_issuer_url=env("OIDC_ISSUER_URL"),
             oidc_client_id=env("OIDC_CLIENT_ID", default="adhar-ai"),

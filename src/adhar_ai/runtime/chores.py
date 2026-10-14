@@ -175,6 +175,40 @@ DEFAULT_CHORES: tuple[ChoreSpec, ...] = (
         dedupe_hint="insight",
     ),
     ChoreSpec(
+        name="failing-builds",
+        summary="Builds that failed since yesterday, grouped by the step that broke.",
+        prompt=(
+            "List the pipeline runs and image builds that failed in the last day. Group "
+            "them by the step or lifecycle phase that broke — six services failing on the "
+            "same missing base image is one problem, not six — and for each group quote "
+            "the log lines that say why, exactly as they appear. Separate the failures "
+            "that are the application's own (a compile error, a failing test) from the "
+            "ones that are the platform's (registry unreachable, quota, a missing "
+            "secret), because they have different owners. If CI is not installed or "
+            "nothing failed, say so in one line."
+        ),
+        tools=("pipeline_runs", "pipeline_run", "builds", "build_logs"),
+        agent="delivery",
+        interval=86400.0,
+        dedupe_hint="build",
+    ),
+    ChoreSpec(
+        name="stale-previews",
+        summary="Preview environments still running for pull requests nobody is working on.",
+        prompt=(
+            "List the preview environments and report the ones that look abandoned: "
+            "unhealthy for a long time, or running for a pull request that is no longer "
+            "being worked on. Each one holds a namespace, a database and an image. Say "
+            "which repository and pull request each belongs to so its owner can be asked, "
+            "and do not propose deleting anything — removing the `preview` label is the "
+            "owner's call and tears it down automatically."
+        ),
+        tools=("previews", "app_status", "sync_status"),
+        agent="delivery",
+        interval=604800.0,
+        dedupe_hint="preview",
+    ),
+    ChoreSpec(
         name="runbook-rot",
         summary="Documented procedures that reference things which no longer exist.",
         prompt=(

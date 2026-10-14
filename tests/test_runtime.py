@@ -11,7 +11,7 @@ import respx
 import yaml
 from fastapi.testclient import TestClient
 
-from adhar_ai.config import DEFAULT_MODELS, PLATFORM_LLM_GATEWAY_URL, RuntimeEnv
+from adhar_ai.config import DEFAULT_MODELS, DOMAINS, PLATFORM_LLM_GATEWAY_URL, RuntimeEnv
 from adhar_ai.gateway.types import FunctionSpec, ToolSpec
 from adhar_ai.rag import Document
 from adhar_ai.rag.sources import DocsSource, classify_doc
@@ -52,6 +52,10 @@ operators:
     trigger: manual
     autonomy: suggest
     allowedTools: [resource_health, app_status, findings, propose_change]
+  build-failure:
+    trigger: tekton
+    autonomy: suggest
+    allowedTools: [pipeline_runs, pipeline_run, build_logs, builds, propose_change]
 mcpServers:
   cluster:       http://adhar-ai-mcp-cluster.adhar-system.svc.cluster.local:8080
   gitops:        http://adhar-ai-mcp-gitops.adhar-system.svc.cluster.local:8080
@@ -75,6 +79,7 @@ def test_configmap_parses_into_the_expected_policy():
         "drift-explain",
         "cost-advisor",
         "upgrade-preflight",
+        "build-failure",
     }
     assert cfg.operators["drift-explain"].autonomy == "read-only"
     assert cfg.operators["drift-explain"].may_write is False
@@ -98,7 +103,9 @@ def test_a_typo_in_the_autonomy_level_is_rejected_not_widened():
 def test_missing_config_file_falls_back_to_shipped_defaults(tmp_path):
     cfg = RuntimeConfig.load(tmp_path / "nope.yaml")
     assert cfg.default_autonomy == "suggest"
-    assert len(cfg.mcp_servers) == 7
+    # One per domain, derived rather than counted: adding a domain should not
+    # need this number edited, and a domain missing a server URL is a bug.
+    assert set(cfg.mcp_servers) == set(DOMAINS)
 
 
 # ------------------------------------------------------------------ fakes ----

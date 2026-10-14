@@ -1,10 +1,10 @@
 # Connecting Claude Code and other AI clients to Adhar MCP
 
-Adhar's seven MCP servers — cluster, gitops, provision, observability,
+Adhar's eight MCP servers — cluster, gitops, provision, observability,
 security, cost, catalog — are federated by agentgateway into **one** MCP
 endpoint. Any client that speaks MCP over streamable HTTP can use it: Claude
 Code, Claude Desktop, Cursor, VS Code Copilot, Windsurf, Zed, an OpenAI
-Agents SDK app, your own agent. They all get the same 29 tools, the same
+Agents SDK app, your own agent. They all get the same 35 tools, the same
 read/write tagging, and the same guarantee: the only write any of them can
 perform is opening a pull request.
 
@@ -42,7 +42,7 @@ claude mcp add --transport http adhar https://mcp.<your-host>/mcp \
 Then, in a session:
 
 ```
-> /mcp                       # shows "adhar" connected and its 29 tools
+> /mcp                       # shows "adhar" connected and its 35 tools
 > which pods are crash-looping in team-ml, and why?
 ```
 
@@ -109,7 +109,7 @@ async with streamablehttp_client(
 ) as (read, write, _):
     async with ClientSession(read, write) as session:
         await session.initialize()
-        tools = await session.list_tools()             # 29 tools, prefixed
+        tools = await session.list_tools()             # 35 tools, prefixed
         result = await session.call_tool("cluster_list_pods", {"namespace": "team-ml"})
 ```
 
@@ -150,7 +150,7 @@ uv run adhar-ai mcp --domain cluster --listen=:18101
 ```
 
 Tool names are **unprefixed** here (`list_pods`), there is no token, and
-`docker compose up` brings up all seven on ports `8090`–`8096`. See
+`docker compose up` brings up all eight on ports `8090`–`8096`. See
 [GETTING_STARTED.md §4–6](GETTING_STARTED.md#4-run-one-mcp-server).
 
 ## 7. When it does not work

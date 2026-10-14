@@ -23,7 +23,7 @@ does when a dependency fails, what it refuses, and how you know it is working.
 ## 1. Observability
 
 Every component serves `/metrics` — the runtime, the local-dev gateway, and each
-of the seven MCP servers. The platform package ships two ServiceMonitors and a
+of the eight MCP servers. The platform package ships two ServiceMonitors and a
 Grafana dashboard.
 
 ### The metrics, and the question each answers

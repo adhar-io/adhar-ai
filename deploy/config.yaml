@@ -62,6 +62,14 @@ operators:
     trigger: manual
     autonomy: suggest
     allowedTools: [resource_health, app_status, findings, propose_change]
+  # The one operator a DEVELOPER reads: a failed pipeline run explains itself,
+  # quoting the step that broke. `propose_change` is listed but will usually
+  # refuse — a service's own source is not in writePolicy.allowedRepos — which
+  # is intended: it explains, and says what to change where.
+  build-failure:
+    trigger: tekton
+    autonomy: suggest
+    allowedTools: [pipeline_runs, pipeline_run, build_logs, builds, propose_change]
 # MCP server endpoints the runtime mounts as tool groups.
 mcpServers:
   cluster:       http://adhar-ai-mcp-cluster.adhar-system.svc.cluster.local:8080
@@ -71,6 +79,7 @@ mcpServers:
   security:      http://adhar-ai-mcp-security.adhar-system.svc.cluster.local:8080
   cost:          http://adhar-ai-mcp-cost.adhar-system.svc.cluster.local:8080
   catalog:       http://adhar-ai-mcp-catalog.adhar-system.svc.cluster.local:8080
+  delivery:      http://adhar-ai-mcp-delivery.adhar-system.svc.cluster.local:8080
 # RAG grounding store (pgvector on CNPG — see pgvector-rag.yaml).
 rag:
   enabled: true

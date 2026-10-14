@@ -27,7 +27,7 @@ and uvicorn's log level.
 | `adhar-ai runtime` | `--config`, `--listen` | `--config` defaults to `$ADHAR_AI_CONFIG`; `--listen=:8080` | The agent runtime: `/chat`, `/operators/{name}/event`, `/findings`, `/config`, `/healthz`. |
 | `adhar-ai gateway` | `--listen` | `--listen=:8080` | The bundled OpenAI-compatible LLM gateway. **Local development only** — see below. |
 | `adhar-ai index` | `--docs`, `--dsn` | `--docs` → `ADHAR_AI_DOCS_PATH`; `--dsn` → the resolved RAG DSN | Re-indexes the docs tree into pgvector and exits. |
-| `adhar-ai tools` | — | — | Prints the tool inventory of all seven domains as JSON and exits. No cluster, no key, no network. |
+| `adhar-ai tools` | — | — | Prints the tool inventory of all eight domains as JSON and exits. No cluster, no key, no network. |
 
 `--domain` accepts exactly: `cluster`, `gitops`, `provision`, `observability`,
 `security`, `cost`, `catalog`. Anything else raises at start-up rather than
@@ -45,7 +45,7 @@ the table and re-ingests, so it is idempotent.
 [ADR-0025](https://github.com/adhar-io/adhar/blob/main/docs/adr/0025-ai-gateway-agentgateway.md)
 retired `adhar-ai-llm-gateway` in favour of upstream
 [agentgateway](https://agentgateway.dev). The platform package deploys the
-runtime and seven MCP servers and **nothing else**; CI publishes eight image
+runtime and eight MCP servers and **nothing else**; CI publishes nine image
 names and there is deliberately no `adhar-ai-gateway` among them.
 
 `adhar-ai gateway` remains in the CLI as the dependency-free local-dev
@@ -146,7 +146,7 @@ tools answer "not configured" — they never fabricate a result.
 |---|---|---|
 | `ADHAR_AI_MCP_DOMAIN` → `MCP_DOMAIN` | `cluster` | Which domain this process serves. `--domain` overrides it. An unknown domain raises `ValueError` at start-up. |
 | `ADHAR_AI_MCP_ALLOWED_HOSTS` → `MCP_ALLOWED_HOSTS` | `*` | Host-header allow-list for the transport's DNS-rebinding guard. `*` turns the guard **off**, which is the default and what makes in-cluster federation work. Set a comma-separated list to switch it back on. |
-| `OIDC_ISSUER_URL` | `""` | Kept for the token-exchange path and standalone local runs. The MCP servers do **not** validate tokens: agentgateway does that once in front of all seven (ADR-0025), so the manifests leave this unset. |
+| `OIDC_ISSUER_URL` | `""` | Kept for the token-exchange path and standalone local runs. The MCP servers do **not** validate tokens: agentgateway does that once in front of all eight (ADR-0025), so the manifests leave this unset. |
 | `OIDC_CLIENT_ID` | `adhar-ai` | Client id for the same path. |
 
 When `ADHAR_AI_MCP_ALLOWED_HOSTS` is a real list, the guard is enabled and the
@@ -222,7 +222,7 @@ databases, for instance, come from the DSN, never from this file).
 | `operators.<name>.trigger` | `manual` | Free text; documentation of what fires it. |
 | `operators.<name>.autonomy` | `autonomy.default` | Validated at load. Combined with the global default by taking the lower rung. |
 | `operators.<name>.allowedTools` | `[]` | Empty means the operator's own built-in default list. |
-| `mcpServers.<domain>` | in-cluster Service URLs for all seven domains | Your entries are **merged over** the defaults, so omitting a domain does not remove it. Give the base URL; `/mcp` is appended. |
+| `mcpServers.<domain>` | in-cluster Service URLs for all eight domains | Your entries are **merged over** the defaults, so omitting a domain does not remove it. Give the base URL; `/mcp` is appended. |
 | `rag.enabled` | `true` | `false` skips the whole grounding bootstrap and `/healthz` reports `disabled`. |
 | `rag.table` | `kb_chunk` | |
 | `findings.table` | `finding` | Must be alphanumeric plus underscores — it is interpolated into SQL, and anything else raises at start-up. |
@@ -321,10 +321,10 @@ two consistent — otherwise a change passes one gate and is refused by the othe
 {
   "status": "ok",
   "autonomy_default": "suggest",
-  "operators": ["alert-triage", "cost-advisor", "drift-explain", "upgrade-preflight"],
-  "mcp_servers_connected": ["catalog", "cluster", "cost", "gitops", "observability", "provision", "security"],
+  "operators": ["alert-triage", "build-failure", "cost-advisor", "drift-explain", "upgrade-preflight"],
+  "mcp_servers_connected": ["catalog", "cluster", "cost", "delivery", "gitops", "observability", "provision", "security"],
   "mcp_servers_unreachable": {},
-  "tools": ["app_diff", "app_status", "budget_status", "correlate", "cost_by", "describe", "findings", "get_events", "list_pods", "list_xrs", "logql", "logs", "policy_explain", "posture", "promql", "propose_change", "propose_exception", "propose_xr", "resource_health", "scaffold", "search_packages", "showback", "slo_burn", "sync_status", "template_params", "traceql", "xr_status"],
+  "tools": ["app_diff", "app_status", "budget_status", "build_logs", "builds", "correlate", "cost_by", "describe", "findings", "get_events", "insights", "list_pods", "list_resources", "list_xrs", "logql", "logs", "pipeline_run", "pipeline_runs", "policy_explain", "posture", "previews", "promotions", "promql", "propose_change", "propose_exception", "propose_xr", "resource_health", "scaffold", "search_packages", "showback", "slo_burn", "sync_status", "template_params", "traceql", "xr_status"],
   "rag": "vector (pgvector) with lexical fallback over 1051 chunks — 1051 chunks indexed from /etc/adhar-ai/docs with gateway embeddings",
   "auth": {
     "oidc": "https://keycloak.adhar.example/realms/adhar",
@@ -560,7 +560,7 @@ call is exactly the event an operator most wants to see:
 | `audit_id` | `aud-<16 hex>`, minted per call. Each layer mints its own — the agent run, the tool call and the pull request each carry a different one. |
 | `tool` | The Python function name of the tool. |
 | `access` | `read` or `write`, from the decorator that registered the tool. |
-| `domain` | Which of the seven servers emitted it. |
+| `domain` | Which of the eight servers emitted it. |
 | `args` | The keyword arguments, redacted (below). |
 | `decision` | `ok`, `error`, or `denied`. |
 | `duration_ms` | Rounded to 0.1 ms. |
@@ -640,7 +640,7 @@ format `%(asctime)s %(levelname)s %(name)s %(message)s`, under the loggers
 | Every caller is `anonymous` even with a valid token | OIDC is off (no `OIDC_ISSUER_URL`, or no JWKS URL), or verification failed. | `/healthz` `auth.oidc` shows `disabled` when it is off. A failed verification logs `rejected bearer token: <Type>: <message>` on `adhar_ai.runtime.auth` — usually an `iss` mismatch (the issuer must equal the claim byte-for-byte) or an `aud` check you enabled with `ADHAR_AI_OIDC_AUDIENCE`. |
 | Runtime answers `401 "authentication required"` | `ADHAR_AI_REQUIRE_AUTH` is true and the request carried no acceptable credential. | The response's `accepts` list names what this runtime would take; `nothing — no credential is configured on this runtime` means `require_auth` is on but neither OIDC nor a webhook token is configured. |
 | `400 "streaming is not implemented by the Adhar AI gateway; set stream=false"` | A client sent `stream: true`. The bundled gateway is non-streaming by design. | Set `stream: false`. In the platform, stream against agentgateway at `https://ai.<host>/v1` instead; the bundled gateway is local-dev only. |
-| `404` from `POST /operators/{name}/event` | The operator name is not registered. | The response carries `available`. Only four exist: `alert-triage`, `drift-explain`, `cost-advisor`, `upgrade-preflight`. A name in the ConfigMap that is not one of these is configuration only — no route appears for it. |
+| `404` from `POST /operators/{name}/event` | The operator name is not registered. | The response carries `available`. Only five exist: `alert-triage`, `drift-explain`, `cost-advisor`, `upgrade-preflight`, `build-failure`. A name in the ConfigMap that is not one of these is configuration only — no route appears for it. |
 | A tool says a backend is "not configured" | Its URL env is unset. Tools report this rather than fabricating data. | Check the relevant `*_URL` from the tables above. For Kubernetes-backed tools, `ADHAR_AI_KUBE_DISABLED=1` produces `BackendNotConfigured: Kubernetes … disabled via ADHAR_AI_KUBE_DISABLED=1`. |
 | Runtime logs `no credential configured … pinned to read-only` at start-up | Neither `OIDC_ISSUER_URL`, `ADHAR_AI_WEBHOOK_TOKEN` nor `ADHAR_AI_REQUIRE_AUTH` is set. Callers are answered but nothing can open a PR. | Expected for `docker compose`. In a cluster, wire Keycloak and the webhook token. |
 | The drift or cost poller never produces a finding | Pollers swallow their exceptions at `DEBUG`. | Run with `--log-level debug` and look for `drift poll skipped: …` / `cost poll skipped: …`. The drift poller fires only on applications that are newly OutOfSync **since its previous pass** — the first pass after start-up reports everything currently drifting, and an app that stays drifting is not re-reported until it recovers and drifts again. |
@@ -673,7 +673,7 @@ export ANTHROPIC_API_KEY=sk-ant-...   # or leave unset for read-only mode
 docker compose up --build
 ```
 
-This brings up the gateway, all seven MCP servers, the runtime and a
+This brings up the gateway, all eight MCP servers, the runtime and a
 pgvector Postgres:
 
 | Service | Host port | Check |
