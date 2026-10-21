@@ -82,10 +82,10 @@ PACKAGES_PATH = env("ADHAR_AI_PACKAGES_PATH", default="")
 def platform_repositories() -> Any:
     """A read-only Gitea client for the platform's own repositories, or `None`.
 
-    Built from `GITEA_API_URL` alone. No token: the knowledge sources only
-    read, the repositories are readable anonymously inside the cluster, and
-    the runtime should not hold a Gitea credential it has no use for — the PR
-    path lives in the gitops MCP server, which does.
+    Built from `GITEA_API_URL`, with `GITEA_BOT_TOKEN` when one is mounted.
+    The knowledge sources only read, but Gitea requires sign-in for every read
+    (`REQUIRE_SIGNIN_VIEW`, 2026-10-21): repositories are not anonymous, inside
+    the cluster or out, so an unauthenticated runtime indexes nothing.
     """
     from ..clients.gitea import GiteaClient
     from ..config import GiteaConfig
@@ -93,7 +93,7 @@ def platform_repositories() -> Any:
     cfg = GiteaConfig.from_env()
     if not cfg.api_url:
         return None
-    return GiteaClient(GiteaConfig(api_url=cfg.api_url, org=cfg.org))
+    return GiteaClient(GiteaConfig(api_url=cfg.api_url, org=cfg.org, bot_token=cfg.bot_token))
 FINDINGS_KEPT = 200
 #: Agent runs one caller may START per window. Not a token budget — that is
 #: agentgateway's, per Keycloak group — but a cap on concurrent expensive work,

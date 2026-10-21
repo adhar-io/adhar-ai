@@ -6,9 +6,7 @@
   <img alt="Adhar — Open Cloud-Native Foundation" src="docs/images/branding/adhar-logo.svg" width="300">
 </picture>
 
-<h1>Adhar AI — the Agentic Layer of the Adhar Platform</h1>
-
-<p><em>Give the platform an agent, not a root shell.</em></p>
+<h1>Adhar AI — The Agentic Layer of the Adhar Platform</h1>
 
 [![Adhar AI](https://img.shields.io/badge/adhar--ai-0.3.5-blue?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMTIgMkw0IDhWMTVDNCAxOC4zMSA2LjY5IDIxIDEwIDIxQzEzLjMxIDIxIDE2IDE4LjMxIDE2IDE1VjhMMTIgMloiIGZpbGw9IndoaXRlIi8+PC9zdmc+)](https://github.com/adhar-io/adhar-ai/releases)
 [![MCP](https://img.shields.io/badge/MCP-native-7C3AED?logo=anthropic)](https://modelcontextprotocol.io)

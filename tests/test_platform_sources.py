@@ -566,3 +566,19 @@ async def test_duplicate_manifest_objects_get_distinct_stable_ids(tmp_path: Path
     ids = [d.doc_id for d in first if "/Deployment/" in d.doc_id]
     assert len(ids) == 2 and len(set(ids)) == 2
     assert ids == [d.doc_id for d in second if "/Deployment/" in d.doc_id], "stable across runs"
+
+
+# Gitea requires sign-in for every read (REQUIRE_SIGNIN_VIEW, 2026-10-21): a
+# runtime client built without the bot token reads nothing, and the knowledge
+# base silently stops covering the platform's own repositories.
+def test_platform_repositories_read_with_the_bot_token(monkeypatch):
+    from adhar_ai.runtime.app import platform_repositories
+
+    monkeypatch.setenv("GITEA_API_URL", "http://gitea-http.adhar-system.svc.cluster.local:3000")
+    monkeypatch.setenv("GITEA_BOT_TOKEN", "t0ken")
+    client = platform_repositories()
+    assert client is not None
+    assert client.cfg.bot_token == "t0ken"
+
+    monkeypatch.delenv("GITEA_BOT_TOKEN")
+    assert platform_repositories().cfg.bot_token == ""
