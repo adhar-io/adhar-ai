@@ -169,6 +169,7 @@ def _reindex(
             environments_path=environment.environments_path,
             cli_path=environment.cli_path,
             gitea=platform_repositories(),
+            knowledge_path=environment.knowledge_path,
             table=cfg.rag_table,
             vector_url=environment.vector_url,
             vector_collection=environment.vector_collection,

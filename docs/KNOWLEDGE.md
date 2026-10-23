@@ -80,14 +80,31 @@ rather than override relevance.
 
 ### Where the platform's own files come from
 
-The manifests, environments, package contracts and CLI source are read through
-a **tree**: a checkout of the `adhar` repository on a workstation
-(`ADHAR_AI_REPO_PATH`), or **Gitea** inside the cluster (`GITEA_API_URL`), which
-holds the `packages` and `environments` repositories the platform is actually
-reconciled from, plus a read-only mirror of the `adhar` source for the docs and
-the CLI. The two produce the same documents, so what the agent knows does not
-depend on where it runs. Gitea is read anonymously — the runtime holds no Gitea
-credential; the pull-request path lives in the gitops MCP server, which does.
+The manifests, environments and package contracts are read through a **tree**:
+a checkout of the `adhar` repository on a workstation (`ADHAR_AI_REPO_PATH`), or
+**Gitea** inside the cluster (`GITEA_API_URL`, read with the `adhar-ai-bot`
+token), which holds the `packages` and `environments` repositories the platform
+is actually reconciled from.
+
+The platform's **documentation, examples, changelog and CLI reference** come
+from a checkout too, or else from the **platform knowledge bundle**
+(`ADHAR_AI_KNOWLEDGE_PATH`, `rag/bundle.py`). The platform controller builds the
+bundle from its own binary — the docs it embeds plus the CLI reference rendered
+from its Cobra tree, flags included — and publishes it as the
+`adhar-ai-knowledge-<n>` ConfigMaps, which the runtime and the reindex CronJob
+mount through one projected volume. It is therefore the release the cluster
+actually runs, needs no egress, and is re-published by an upgraded controller.
+Every part is verified against `manifest.json`; a half-updated mount is never
+indexed (the last good bundle is served, or the origin fails rather than being
+emptied). Each document carries `platform_version`, `platform_commit` and
+`bundle_digest` in its metadata — on chunks embedded since that release; an
+unchanged chunk keeps the version it was first embedded under — and
+`release.md` states the version in prose.
+
+Until 2026-10-23 the cluster kept a Gitea pull mirror of the `adhar` repository
+for this. It tracked upstream `main` rather than the deployed release, needed
+egress, and fed only the CLI parser: the docs ConfigMap the indexer also looked
+for was never created, so in the cluster the agent had no platform docs at all.
 
 Before this, the in-cluster runtime read documentation from an optional
 ConfigMap and nothing else. It knew the platform's rationale and none of its

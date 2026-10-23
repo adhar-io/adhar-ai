@@ -180,6 +180,7 @@ Accepted algorithms are `RS256`, `RS512` and `ES256`. The subject is
 | `ADHAR_AI_PACKAGES_PATH` | `$ADHAR_AI_REPO_PATH/platform/stack/packages` | Package contracts and manifests. |
 | `ADHAR_AI_ENVIRONMENTS_PATH` | `$ADHAR_AI_REPO_PATH/platform/stack/environments` | Per-environment package enablement. |
 | `ADHAR_AI_CLI_PATH` | `$ADHAR_AI_REPO_PATH` | The repository root whose `cmd/` holds the Cobra CLI definitions. |
+| `ADHAR_AI_KNOWLEDGE_PATH` | unset (`/var/lib/adhar-ai/knowledge` in the cluster) | The platform knowledge bundle the controller publishes (`adhar-ai-knowledge-<n>` ConfigMaps): docs, examples, changelog and CLI reference of the running release. Used for docs and CLI when no checkout/docs tree is present. |
 | `GITEA_API_URL` | unset on the runtime | When set and the paths above do not exist, the same content is read from Gitea's `packages`, `environments` and `adhar` repositories — anonymously, no token. This is the in-cluster configuration. |
 | `ADHAR_AI_RAG_DSN` → `RAG_DSN` → `DATABASE_URL` | composed from `RAG_DB_*` (below) | pgvector DSN. Also the findings store's database. |
 | `RAG_DB_HOST` → `host` | `""` | If no DSN was given and no host is set, the DSN is empty and RAG runs lexical-only. |

@@ -203,10 +203,12 @@ def create_app(
             packages_path=environment.packages_path or PACKAGES_PATH,
             environments_path=environment.environments_path,
             cli_path=environment.cli_path,
-            # In the cluster the platform's repositories are read from Gitea,
-            # anonymously: they are readable inside the cluster and this is a
-            # read. A checkout on disk wins where one exists.
+            # In the cluster the GitOps repositories (packages, environments)
+            # are read from Gitea with the bot token; the platform's docs and
+            # CLI reference from the controller's knowledge bundle. A checkout
+            # on disk wins over both where one exists.
             gitea=platform_repositories(),
+            knowledge_path=environment.knowledge_path,
             table=config.rag_table,
             vector_url=environment.vector_url,
             vector_collection=environment.vector_collection,

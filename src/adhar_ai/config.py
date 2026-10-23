@@ -415,6 +415,9 @@ class RuntimeEnv:
     packages_path: str = ""
     environments_path: str = ""
     cli_path: str = ""
+    #: The platform knowledge bundle the controller publishes (docs, examples,
+    #: changelog, CLI reference of the running release); see `rag/bundle.py`.
+    knowledge_path: str = ""
 
     @classmethod
     def from_env(cls) -> RuntimeEnv:
@@ -451,6 +454,7 @@ class RuntimeEnv:
             packages_path=under("ADHAR_AI_PACKAGES_PATH", "platform/stack/packages"),
             environments_path=under("ADHAR_AI_ENVIRONMENTS_PATH", "platform/stack/environments"),
             cli_path=under("ADHAR_AI_CLI_PATH", ""),
+            knowledge_path=env("ADHAR_AI_KNOWLEDGE_PATH", default=""),
         )
 
 

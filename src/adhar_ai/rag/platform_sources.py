@@ -7,7 +7,8 @@ checkout on a workstation and from Gitea inside the cluster:
   as prose, plus one overview page per package and each package's README.
 * **EnvironmentSource** — which packages are enabled in each environment.
 * **CliSource** — the `adhar` CLI's command tree with its help text, parsed
-  from the Cobra definitions in the Go source.
+  from the Cobra definitions in a checkout's Go source (in the cluster the
+  knowledge bundle carries the rendered reference instead; see `bundle.py`).
 
 Before these existed the knowledge base held the platform's *rationale* — the
 ADRs and guides — and none of its *configuration*. Asked which database
@@ -306,10 +307,11 @@ ROOT_ADD_RE = re.compile(r"(?<![.\w])AddCommand\((?P<children>[^)]*)\)", re.S)
 class CliSource:
     """The `adhar` CLI, from its Cobra definitions.
 
-    Parsed from source rather than from `adhar --help` because the in-cluster
-    runtime has the repository and not the binary. The help text is the same
-    text; what is lost is anything computed at runtime, which for a help string
-    is nothing.
+    Parsed from source, for a workstation with a checkout of the `adhar`
+    repository. In the cluster the reference arrives pre-rendered from the
+    binary's own Cobra tree, flags included, in the platform knowledge bundle
+    (`rag/bundle.py`); both emit `cli:<binary>-<command>` documents of origin
+    `cli`, so either one updates the other's rows in place.
     """
 
     origin = "cli"

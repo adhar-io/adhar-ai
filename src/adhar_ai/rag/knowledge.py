@@ -34,8 +34,10 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from .bundle import BundleSource, PlatformBundle
 from .documents import Chunk, Document
 from .extract import (
     ArgoGraphSource,
@@ -101,16 +103,21 @@ class KnowledgeBase:
         environments_path: str = "",
         cli_path: str = "",
         gitea: Any = None,
+        knowledge_path: str = "",
         vector_url: str = "",
         vector_collection: str = "adhar_knowledge",
         vector_api_key: str = "",
     ) -> KnowledgeBase:
         """Assemble the sources this runtime can read.
 
-        The platform's own repositories are read through a `Tree`: a local
-        checkout when one is present (a workstation), otherwise Gitea (the
-        cluster). The two cases produce the same documents, which is the point
-        — what the agent knows must not depend on where it happens to run.
+        The platform's GitOps repositories (`packages`, `environments`) are read
+        through a `Tree`: a local checkout when one is present (a workstation),
+        otherwise Gitea (the cluster). Its documentation, examples and CLI
+        reference come from a checkout the same way, or else from the knowledge
+        bundle the platform controller publishes (`knowledge_path`, see
+        `rag/bundle.py`) — never from Gitea: the cluster no longer mirrors the
+        `adhar` repository. What the agent knows must not depend on where it
+        happens to run.
         """
         from .extract import EnvironmentGraphSource, ManifestGraphSource
         from .platform_sources import CliSource, EnvironmentSource, ManifestsSource
@@ -133,9 +140,14 @@ class KnowledgeBase:
 
         packages_tree = tree_for(packages_path, gitea, "packages")
         environments_tree = tree_for(environments_path, gitea, "environments")
-        # The CLI source lives in the `adhar` repository itself, which is only
-        # in Gitea if the platform mirrors it (globals.GitOpsRepoSource).
-        cli_tree = tree_for(cli_path, gitea, "adhar")
+        # The CLI is parsed from a checkout's Go source on a workstation; in the
+        # cluster it arrives pre-rendered, with its flags, in the bundle.
+        cli_tree = tree_for(cli_path, None, "adhar")
+        bundle = PlatformBundle(knowledge_path) if knowledge_path else None
+        # A docs tree on disk wins over the bundle, as a checkout wins over
+        # Gitea. Never both: they share the `docs` origin, and two sources of
+        # one origin would each prune the other's documents on every refresh.
+        local_docs = bool(docs_path) and Path(docs_path).exists()
 
         manifests = ManifestsSource(packages_tree)
         environments = EnvironmentSource(environments_tree)
@@ -151,8 +163,10 @@ class KnowledgeBase:
             graph_sources.extend([ArgoGraphSource(toolbox), WorkloadGraphSource(toolbox)])
 
         sources: list[Source] = [ToolsSource()]
-        if docs_path:
+        if local_docs or (docs_path and bundle is None):
             sources.append(DocsSource(docs_path))
+        elif bundle is not None:
+            sources.append(BundleSource(bundle, "docs"))
         if packages_path:
             sources.append(PackagesSource(packages_path))
         if packages_tree is not None:
@@ -161,6 +175,10 @@ class KnowledgeBase:
             sources.append(environments)
         if cli_tree is not None:
             sources.append(CliSource(cli_tree))
+        elif bundle is not None:
+            sources.append(BundleSource(bundle, "cli"))
+        if bundle is not None:
+            sources.append(BundleSource(bundle, "examples"))
         if toolbox is not None:
             sources.append(ClusterSource(toolbox))
         if findings is not None:
