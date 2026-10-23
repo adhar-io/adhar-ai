@@ -8,7 +8,7 @@
 
 <h1>Adhar AI — The Agentic Layer of the Adhar Platform</h1>
 
-[![Adhar AI](https://img.shields.io/badge/adhar--ai-0.3.6-blue?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMTIgMkw0IDhWMTVDNCAxOC4zMSA2LjY5IDIxIDEwIDIxQzEzLjMxIDIxIDE2IDE4LjMxIDE2IDE1VjhMMTIgMloiIGZpbGw9IndoaXRlIi8+PC9zdmc+)](https://github.com/adhar-io/adhar-ai/releases)
+[![Adhar AI](https://img.shields.io/badge/adhar--ai-0.3.7-blue?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMTIgMkw0IDhWMTVDNCAxOC4zMSA2LjY5IDIxIDEwIDIxQzEzLjMxIDIxIDE2IDE4LjMxIDE2IDE1VjhMMTIgMloiIGZpbGw9IndoaXRlIi8+PC9zdmc+)](https://github.com/adhar-io/adhar-ai/releases)
 [![MCP](https://img.shields.io/badge/MCP-native-7C3AED?logo=anthropic)](https://modelcontextprotocol.io)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org)
 [![Tools](https://img.shields.io/badge/governed_tools-29-blue)](contract/tools.json)

@@ -8,7 +8,7 @@ Three roles ship from one image, selected by subcommand:
   * ``adhar_ai.runtime``  the plan-act-observe agent loop and its operators
 """
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 
 
 def build_info() -> dict[str, str]:
